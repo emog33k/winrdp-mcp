@@ -9,12 +9,20 @@ Initial release. A zero-config MCP server that provisions and fully administers 
 RDP boxes (Win10/11, Server 2016–2025) for Claude & Claude Code.
 
 ### Added
-- **118 tools** across 11 groups: hosts/fleet, provisioning & UAC, system, scripting,
-  files, admin, RDP, software, network, deeper Windows management, and native GUI automation.
+- **136 tools** across 13 groups: hosts/fleet, provisioning & UAC, system, scripting,
+  files, admin, RDP, software, network, deeper Windows management, native GUI automation,
+  wait-for-condition helpers, and scheduling/persistence.
 - **Native GUI automation** (`gui.py`) — drive the interactive RDP desktop with no on-box
-  agent: `send_keys`, `type_text`, `mouse_move`/`mouse_click`, `list_windows`,
-  `focus_window`, UI Automation (`ui_find`/`ui_invoke`/`ui_set_text`), and `gui_script`
-  (a single-call multi-step sequence with mouse/UIA helpers pre-loaded).
+  agent: `send_keys`, `type_text`, `mouse_move`/`mouse_click`/`mouse_drag`, `list_windows`,
+  `focus_window`, UI Automation (`ui_find`/`ui_invoke`/`ui_set_text`), built-in OCR
+  (`ocr_screen`/`find_and_click`), `wait_for_window`, `record_screen` (animated GIF), and
+  `gui_script` (a single-call multi-step sequence with mouse/UIA helpers pre-loaded).
+- **Wait-for-condition helpers** (`waiters.py`) — `wait_for_port`, `wait_for_service`,
+  `wait_for_process`, `wait_for_file`; polled controller-side so any timeout is safe.
+- **File convenience** — `download_file`, `tail_file`, `edit_file` (find/replace),
+  `sync_folder` (zip→upload→expand a local folder), `transfer_between_hosts`.
+- **Scheduling & persistence** (`scheduling.py`) — `schedule_command`, `run_at_startup`,
+  and `persist_as_service` (a resilient auto-restarting service via NSSM) / `unpersist_service`.
 - **Zero-config provisioning ladder** — `provision_host` climbs WinRM → SSH → SMB/WMI
   cold-start → paste-once bootstrap, enabling WinRM, opening the firewall, and fixing
   local-admin token filtering on any Windows version.

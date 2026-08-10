@@ -49,6 +49,8 @@ READONLY = {
     "net_info", "ping", "port_check", "net_connections", "port_proxy_list",
     "cim_query", "hotfixes", "defender_status", "env_get", "list_startup",
     "list_installed_software", "rdp_connection_file", "list_windows", "ui_find",
+    "wait_for_port", "wait_for_service", "wait_for_process", "wait_for_file",
+    "wait_for_window", "tail_file", "ocr_screen", "record_screen",
 }
 
 # Destructive tools: delete data, kill processes, cut access, or reboot. Clients should
@@ -59,6 +61,7 @@ DESTRUCTIVE = {
     "rdp_disable", "clear_event_log", "uninstall_software", "defender_realtime",
     "task_delete", "cleanup_staged", "rdp_logoff_session", "port_proxy_delete",
     "install_rdp_wrapper", "uac_set", "rdp_connect_to_console", "rdp_set_port",
+    "unpersist_service",
 }
 
 

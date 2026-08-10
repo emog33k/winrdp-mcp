@@ -2,7 +2,7 @@
 
 How `winrdp-mcp` works internally — a map of the real modules for contributors and reviewers.
 
-`winrdp-mcp` is a [FastMCP](https://github.com/jlowin/fastmcp) server that provisions and administers Windows RDP boxes (Win10/11, Server 2016–2025) with **nothing pre-installed on the target**. It exposes 118 tools across ten modules and reaches boxes over WinRM, SSH, SMB, or DCOM/WMI. This document traces a request from Claude down to the box and back, then describes each internal subsystem in the order the code layers on top of itself: transports → PowerShell marshaling → provisioning → elevation → execution context → vault → tooling → server registration.
+`winrdp-mcp` is a [FastMCP](https://github.com/jlowin/fastmcp) server that provisions and administers Windows RDP boxes (Win10/11, Server 2016–2025) with **nothing pre-installed on the target**. It exposes 136 tools across ten modules and reaches boxes over WinRM, SSH, SMB, or DCOM/WMI. This document traces a request from Claude down to the box and back, then describes each internal subsystem in the order the code layers on top of itself: transports → PowerShell marshaling → provisioning → elevation → execution context → vault → tooling → server registration.
 
 Every path, port, env var, and function name below is taken from the source; file references point at the module that owns the behavior.
 
@@ -52,7 +52,7 @@ winrdp-mcp agent
 graph TD
     Claude["Claude / Claude Code (MCP client)"]
     subgraph server["FastMCP server — server.py"]
-        Tools["118 @mcp.tool functions<br/>tools/*.py"]
+        Tools["136 @mcp.tool functions<br/>tools/*.py"]
         Ctx["Context — context.py<br/>host resolution, transport cache,<br/>exec_ps / exec_json / run_long"]
     end
     subgraph exec["execution helpers"]
@@ -391,7 +391,7 @@ A tool skipped by the allowlist is not registered with FastMCP but the underlyin
 | `winrdp_mcp/tooling.py` | On-demand staging of scripts/tools into `C:\ProgramData\winrdp-mcp\tools` |
 | `winrdp_mcp/config.py` | Data-dir/path resolution, remote staging paths, default ports |
 | `winrdp_mcp/log.py` | stderr-only logging + secret redaction |
-| `winrdp_mcp/tools/` | The 118 tools across `hosts`, `provisioning`, `system`, `scripting`, `files`, `admin`, `rdp`, `software`, `network`, `windows` — each exposes `register(mcp, ctx)` |
+| `winrdp_mcp/tools/` | The 136 tools across `hosts`, `provisioning`, `system`, `scripting`, `files`, `admin`, `rdp`, `software`, `network`, `windows` — each exposes `register(mcp, ctx)` |
 
 ### Config surface (env vars)
 

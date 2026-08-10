@@ -257,7 +257,7 @@ Set-NetFirewallRule -Name 'WINRM-HTTPS-In-5986' -RemoteAddress 10.20.0.0/24
 
 ## 4. Least privilege: tool allow/block lists
 
-The server registers **118 tools**. In production, expose only what the operator actually
+The server registers **136 tools**. In production, expose only what the operator actually
 needs. Two CSV env vars gate registration (`winrdp_mcp/server.py::_install_tool_wrapper`):
 
 | Variable | Semantics |

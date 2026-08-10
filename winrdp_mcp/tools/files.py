@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import binascii
+import os
+import shutil
+import tempfile
 from typing import Optional
 
 from .. import ps
+from ..config import REMOTE_TMP
 
 
 def register(mcp, ctx) -> None:
@@ -175,3 +180,87 @@ def register(mcp, ctx) -> None:
         rec = "/R /D Y " if recurse else ""
         r = ctx.exec_ps(f"takeown /F {ps.ps_string(path)} {rec}/A", host=host, elevated=True, timeout=300)
         return {"stdout": r.stdout, "stderr": r.stderr, "rc": r.rc}
+
+    @mcp.tool
+    def download_file(url: str, dest: str, host: Optional[str] = None, timeout: int = 600) -> dict:
+        """Download a URL directly onto a box (server-side, TLS 1.2). Returns size + SHA-256."""
+        body = (
+            "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12;"
+            f"$d=Split-Path {ps.ps_string(dest)} -Parent;"
+            "if($d -and -not(Test-Path $d)){New-Item -ItemType Directory -Path $d -Force|Out-Null};"
+            f"(New-Object Net.WebClient).DownloadFile({ps.ps_string(url)},{ps.ps_string(dest)});"
+            f"$fi=Get-Item {ps.ps_string(dest)};"
+            "$result=@{path=$fi.FullName;bytes=$fi.Length;"
+            "sha256=(Get-FileHash $fi.FullName -Algorithm SHA256).Hash}"
+        )
+        return ctx.exec_json(body, host=host, timeout=timeout)
+
+    @mcp.tool
+    def tail_file(path: str, host: Optional[str] = None, lines: int = 50) -> dict:
+        """Return the last N lines of a text file on a box (snapshot)."""
+        body = (
+            f"$t=Get-Content -LiteralPath {ps.ps_string(path)} -Tail {int(lines)} -ErrorAction Stop;"
+            "$result=@{path=" + ps.ps_string(path) + ";lines=@($t)}"
+        )
+        return ctx.exec_json(body, host=host, timeout=120)
+
+    @mcp.tool
+    def edit_file(path: str, find: str, replace: str, host: Optional[str] = None,
+                  regex: bool = False, count_only: bool = False) -> dict:
+        """Find/replace inside a text file on a box (literal by default, or `regex`).
+        Returns the number of replacements; set count_only to preview without writing."""
+        if regex:
+            match = f"([regex]::Matches($c,{ps.ps_string(find)})).Count"
+            new = f"[regex]::Replace($c,{ps.ps_string(find)},{ps.ps_string(replace)})"
+        else:
+            match = f"(($c.Length-$c.Replace({ps.ps_string(find)},'').Length)/[Math]::Max(1,{ps.ps_string(find)}.Length))"
+            new = f"$c.Replace({ps.ps_string(find)},{ps.ps_string(replace)})"
+        write = "" if count_only else (
+            f"[IO.File]::WriteAllText({ps.ps_string(path)},$n,[Text.UTF8Encoding]::new($false));")
+        body = (
+            f"$c=[IO.File]::ReadAllText({ps.ps_string(path)});$cnt=[int]({match});$n={new};"
+            + write +
+            "$result=@{path=" + ps.ps_string(path) + ";replacements=$cnt;written=" +
+            ("$false" if count_only else "$true") + "}"
+        )
+        return ctx.exec_json(body, host=host, timeout=120)
+
+    @mcp.tool
+    def sync_folder(local_path: str, remote_path: str, host: Optional[str] = None,
+                    mirror: bool = False) -> dict:
+        """Mirror a LOCAL operator folder to a box efficiently (zip → upload → expand).
+        mirror=True wipes the destination first so it matches the source exactly."""
+        if not os.path.isdir(local_path):
+            return {"error": f"not a directory: {local_path}"}
+        tmp_base = os.path.join(tempfile.gettempdir(), "winrdp_sync_" + binascii.hexlify(os.urandom(4)).decode())
+        zip_path = shutil.make_archive(tmp_base, "zip", local_path)
+        try:
+            data = open(zip_path, "rb").read()
+            rid = binascii.hexlify(os.urandom(4)).decode()
+            remote_zip = f"{REMOTE_TMP}\\sync_{rid}.zip"
+            t = ctx.transport_for(host)
+            t.upload(data, remote_zip)
+            clear = (f"if(Test-Path {ps.ps_string(remote_path)}){{Remove-Item -LiteralPath {ps.ps_string(remote_path)} "
+                     "-Recurse -Force}};") if mirror else ""
+            body = (
+                clear +
+                f"New-Item -ItemType Directory -Path {ps.ps_string(remote_path)} -Force|Out-Null;"
+                f"Expand-Archive -Path {ps.ps_string(remote_zip)} -DestinationPath {ps.ps_string(remote_path)} -Force;"
+                f"Remove-Item -LiteralPath {ps.ps_string(remote_zip)} -Force;"
+                f"$n=@(Get-ChildItem -LiteralPath {ps.ps_string(remote_path)} -Recurse -File).Count;"
+                "$result=@{dest=" + ps.ps_string(remote_path) + ";files=$n;mirror=" +
+                ("$true" if mirror else "$false") + "}"
+            )
+            return ctx.exec_json(body, host=host, timeout=600)
+        finally:
+            try:
+                os.remove(zip_path)
+            except OSError:
+                pass
+
+    @mcp.tool
+    def transfer_between_hosts(src_host: str, src_path: str, dst_host: str, dst_path: str) -> dict:
+        """Copy a file from one registered box to another, straight through the controller."""
+        data = ctx.transport_for(src_host).download(src_path)
+        ctx.transport_for(dst_host).upload(data, dst_path)
+        return {"ok": True, "src": f"{src_host}:{src_path}", "dst": f"{dst_host}:{dst_path}", "bytes": len(data)}

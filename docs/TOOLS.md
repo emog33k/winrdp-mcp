@@ -18,7 +18,9 @@ The complete catalog of every tool exposed by the `winrdp-mcp` FastMCP server. E
 - [Software](#software) — `winrdp_mcp/tools/software.py`
 - [Network](#network) — `winrdp_mcp/tools/network.py`
 - [Windows](#windows) — `winrdp_mcp/tools/windows.py`
-- [GUI](#gui-guipy--10-tools) — `winrdp_mcp/tools/gui.py`
+- [GUI](#gui-guipy--15-tools) — `winrdp_mcp/tools/gui.py`
+- [Waiters](#waiters-waiterspy--4-tools) — `winrdp_mcp/tools/waiters.py`
+- [Scheduling](#scheduling-schedulingpy--4-tools) — `winrdp_mcp/tools/scheduling.py`
 
 ## Safety classification
 
@@ -40,14 +42,16 @@ Tool visibility can be narrowed at startup: `WINRDP_ENABLED_TOOLS` (CSV allow-li
 | Provisioning / UAC / Tooling | `provisioning.py` | 10 | 2 | 2 | 6 |
 | System | `system.py` | 8 | 4 | 2 | 2 |
 | Scripting | `scripting.py` | 6 | 0 | 0 | 6 |
-| Files | `files.py` | 16 | 6 | 1 | 9 |
+| Files | `files.py` | 21 | 7 | 1 | 13 |
 | Admin | `admin.py` | 25 | 6 | 7 | 12 |
 | RDP | `rdp.py` | 12 | 3 | 5 | 4 |
 | Software | `software.py` | 4 | 1 | 1 | 2 |
 | Network | `network.py` | 8 | 5 | 1 | 2 |
 | Windows | `windows.py` | 11 | 5 | 1 | 5 |
-| GUI | `gui.py` | 10 | 2 | 0 | 8 |
-| **Total** | | **118** | **36** | **22** | **60** |
+| GUI | `gui.py` | 15 | 5 | 0 | 10 |
+| Waiters | `waiters.py` | 4 | 4 | 0 | 0 |
+| Scheduling | `scheduling.py` | 4 | 0 | 1 | 3 |
+| **Total** | | **136** | **44** | **23** | **69** |
 
 ---
 
@@ -382,6 +386,36 @@ grant_acl(path: str, principal: str, rights: str = "FullControl",
 Take ownership of a file/folder via `takeown` (needed before changing a locked ACL). Runs elevated.
 ```python
 take_own(path: str, host: Optional[str] = None, recurse: bool = False)
+```
+
+#### `download_file` — mutating
+Download a URL directly onto a box (server-side, TLS 1.2). Returns size + SHA-256.
+```python
+download_file(url: str, dest: str, host: Optional[str] = None, timeout: int = 600)
+```
+
+#### `tail_file` — read-only
+Return the last N lines of a text file on a box (snapshot).
+```python
+tail_file(path: str, host: Optional[str] = None, lines: int = 50)
+```
+
+#### `edit_file` — mutating
+Find/replace inside a text file on a box (literal by default, or `regex`). Returns the replacement count; `count_only` previews without writing.
+```python
+edit_file(path: str, find: str, replace: str, host: Optional[str] = None, regex: bool = False, count_only: bool = False)
+```
+
+#### `sync_folder` — mutating
+Mirror a LOCAL operator folder to a box efficiently (zip → upload → expand). `mirror=True` wipes the destination first.
+```python
+sync_folder(local_path: str, remote_path: str, host: Optional[str] = None, mirror: bool = False)
+```
+
+#### `transfer_between_hosts` — mutating
+Copy a file from one registered box to another, straight through the controller.
+```python
+transfer_between_hosts(src_host: str, src_path: str, dst_host: str, dst_path: str)
 ```
 
 ---
@@ -794,7 +828,7 @@ list_startup(host: Optional[str] = None)
 
 ---
 
-## GUI (`gui.py`) — 10 tools
+## GUI (`gui.py`) — 15 tools
 
 Native GUI automation of the interactive RDP desktop (keyboard, mouse, UI Automation) with
 no on-box agent. Every tool runs inside the logged-on user's session via `as_user`, so it
@@ -864,4 +898,96 @@ Run a PowerShell block in the interactive session with GUI helpers pre-loaded
 one-call way to do a multi-step GUI sequence without per-action latency.
 ```python
 gui_script(script: str, host: Optional[str] = None, timeout: int = 180)
+```
+
+#### `mouse_drag`
+Press at (x1,y1), drag to (x2,y2), release. `button`: left | right | middle.
+```python
+mouse_drag(x1: int, y1: int, x2: int, y2: int, host: Optional[str] = None, button: str = "left", steps: int = 20)
+```
+
+#### `wait_for_window` — read-only
+Wait until a window whose title contains `title` appears (polls in-session in one call).
+```python
+wait_for_window(title: str, host: Optional[str] = None, timeout: int = 60, interval: int = 2)
+```
+
+#### `ocr_screen` — read-only
+Read text off the live desktop via the built-in Windows OCR engine (Win10+). Returns full text plus per-word screen coordinates.
+```python
+ocr_screen(host: Optional[str] = None)
+```
+
+#### `find_and_click`
+OCR the desktop, find on-screen `text`, and click its center — vision-lite clicking for UIs UI Automation can't see. `occurrence` picks the Nth match.
+```python
+find_and_click(text: str, host: Optional[str] = None, button: str = "left", double: bool = False, occurrence: int = 1)
+```
+
+#### `record_screen` — read-only
+Record the desktop for a few seconds and return it as an animated GIF (frames downscaled to `max_width`). Keep it short.
+```python
+record_screen(host: Optional[str] = None, seconds: int = 5, fps: int = 4, max_width: int = 960)
+```
+
+---
+
+## Waiters (`waiters.py`) — 4 tools
+
+Block until a box reaches a target state. Polled controller-side with short calls (each survives a transient disconnect via the transport self-heal), so any timeout is safe. All read-only.
+
+#### `wait_for_port` — read-only
+Wait until a TCP `port` on `target` is reachable *from the box*. `state`: open | closed.
+```python
+wait_for_port(target: str, port: int, host: Optional[str] = None, state: str = "open", timeout: int = 120, interval: int = 3)
+```
+
+#### `wait_for_service` — read-only
+Wait until a service reaches a status (Running | Stopped | Paused).
+```python
+wait_for_service(name: str, host: Optional[str] = None, status: str = "Running", timeout: int = 120, interval: int = 3)
+```
+
+#### `wait_for_process` — read-only
+Wait until a process is present (`present=True`) or gone (`present=False`).
+```python
+wait_for_process(name: str, host: Optional[str] = None, present: bool = True, timeout: int = 120, interval: int = 3)
+```
+
+#### `wait_for_file` — read-only
+Wait until a file/directory exists (`exists=True`) or disappears (`exists=False`).
+```python
+wait_for_file(path: str, host: Optional[str] = None, exists: bool = True, timeout: int = 120, interval: int = 3)
+```
+
+---
+
+## Scheduling (`scheduling.py`) — 4 tools
+
+Run commands on a schedule, at startup, or as a resilient auto-restarting service.
+
+#### `schedule_command`
+Create a recurring scheduled task. `schedule`: MINUTE | HOURLY | DAILY | WEEKLY | ONLOGON | ONSTART; `every` is the interval modifier for MINUTE/HOURLY. Runs `run_as` (SYSTEM needs no password).
+```python
+schedule_command(name: str, command: str, host: Optional[str] = None, schedule: str = "DAILY",
+                 start_time: str = "09:00", every: Optional[int] = None, run_as: str = "SYSTEM", highest: bool = True)
+```
+
+#### `run_at_startup`
+Register a command to run automatically at boot (ONSTART) or logon (ONLOGON).
+```python
+run_at_startup(name: str, command: str, host: Optional[str] = None, at: str = "boot", run_as: str = "SYSTEM", highest: bool = True)
+```
+
+#### `persist_as_service`
+Install a command as a resilient auto-restarting Windows service via NSSM (downloaded on first use). Runs elevated.
+```python
+persist_as_service(name: str, command: str, host: Optional[str] = None, display_name: Optional[str] = None,
+                   autostart: bool = True, start_now: bool = True, timeout: int = 300)
+```
+
+#### `unpersist_service` — destructive
+Stop and remove a service previously created with `persist_as_service`.
+```python
+unpersist_service(name: str, host: Optional[str] = None)
 ```

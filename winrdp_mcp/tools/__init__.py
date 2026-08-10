@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from . import admin, files, gui, hosts, network, provisioning, rdp, scripting, software, system, windows
+from . import (admin, files, gui, hosts, network, provisioning, rdp, scheduling, scripting,
+               software, system, waiters, windows)
 
-MODULES = [hosts, provisioning, system, scripting, files, admin, rdp, software, network, windows, gui]
+MODULES = [hosts, provisioning, system, scripting, files, admin, rdp, software, network,
+           windows, gui, waiters, scheduling]
 
 
 def register_all(mcp, ctx) -> None:
