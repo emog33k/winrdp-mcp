@@ -3,6 +3,13 @@
 All notable changes to winrdp-mcp are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses semantic versioning.
 
+## [0.1.3] — 2026-08-10
+
+### Added
+- Listed on the official **MCP Registry** (`io.github.emog33k/winrdp-mcp`). Requires an
+  `mcp-name:` ownership marker in the package README, added here; `server.json` moved to the
+  current 2025-12-11 schema.
+
 ## [0.1.2] — 2026-08-10
 
 ### Fixed

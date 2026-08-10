@@ -2,7 +2,7 @@
   "dxt_version": "0.1",
   "name": "winrdp-mcp",
   "display_name": "Windows RDP Admin",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Provision and fully administer any Windows RDP box (Win10/11/Server) over WinRM/SSH/SMB.",
   "long_description": "Zero-config MCP server that brings a Windows box under management with one call and then exposes 144 tools to run it: elevated PowerShell/Python, files and fast transfer, RDP control, desktop/GUI automation, networking, scheduling, and security ops. Built for Claude and Claude Code.",
   "author": {

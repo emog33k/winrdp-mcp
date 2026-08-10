@@ -1,3 +1,5 @@
+<!-- mcp-name: io.github.emog33k/winrdp-mcp -->
+
 # winrdp-mcp
 
 **A zero-config [MCP](https://modelcontextprotocol.io) server that provisions and fully administers any Windows RDP box — Windows 10/11 and Server 2016–2025 — for Claude and Claude Code.**
