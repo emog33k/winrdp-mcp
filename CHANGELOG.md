@@ -77,6 +77,12 @@ RDP boxes (Win10/11, Server 2016–2025) for Claude & Claude Code.
   (reconnect RDP or `rdp_connect_to_console`) instead of running on a non-composed desktop.
 - New `port_forward` / `port_forward_list` / `port_forward_stop`: SSH local tunnels to reach
   a service bound to a box's 127.0.0.1 (which WinRM-launched processes cannot).
+- `run_powershell(detach=True)` / `start_process(detach=True)`: launch a background process
+  in a Scheduled Task so it runs OUTSIDE the WinRM Job Object and survives the session close
+  (a normal launch dies with the shell — that's why a background server only lived ~1 min).
+- `run_powershell(loopback=True)`: route through a Scheduled Task so the script can reach
+  127.0.0.1 — the WinRM network-logon token blocks outbound loopback, the task's logon does
+  not. (`file_write` already streams over SFTP/SMB, bypassing the WinRM command channel.)
 - Fixed three latent PowerShell brace-balance / output bugs surfaced by a brace-balance
   audit and live runs: `ensure_remote_dirs` (broke all tool-staging), `tail_file` (returned
   megabytes of provider metadata), and `find_and_click`.

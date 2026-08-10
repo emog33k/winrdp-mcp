@@ -83,6 +83,11 @@ class Context:
         return rep.to_dict()
 
     # ---- execution primitives -------------------------------------------
+    def run_detached(self, script: str, *, host: Optional[str] = None) -> dict:
+        """Launch a script fire-and-forget via a Scheduled Task — survives session close
+        (outside the WinRM Job Object) and has loopback access. Returns task + log paths."""
+        return elevation.run_detached(self.transport_for(host), script)
+
     def exec_ps(
         self,
         body_or_script: str,
@@ -91,6 +96,7 @@ class Context:
         wrap: bool = False,
         elevated: bool = False,
         as_user: bool = False,
+        loopback: bool = False,
         timeout: int = 120,
     ) -> ExecResult:
         h = self.resolve(host)
@@ -102,9 +108,10 @@ class Context:
             if as_user:
                 r = elevation.run_in_user_session(t, script, timeout=timeout)
                 return r
-            if elevated and not t.is_elevated():
-                # Session token is filtered (e.g. SSH / non-elevated local): get a full
-                # token via the scheduled-task SYSTEM path.
+            # loopback=True forces the Scheduled Task path even when the WinRM session is
+            # already elevated: the network-logon token blocks outbound 127.0.0.1, but the
+            # task's service/batch logon does not.
+            if loopback or (elevated and not t.is_elevated()):
                 er = elevation.run_elevated(t, script, timeout=timeout, run_as="SYSTEM")
                 return ExecResult(er.stdout, er.stderr, er.rc)
             # Either not elevated, or the session already holds a full admin token — run

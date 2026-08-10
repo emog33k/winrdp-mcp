@@ -20,16 +20,26 @@ def register(mcp, ctx) -> None:
         host: Optional[str] = None,
         elevated: bool = False,
         as_user: bool = False,
+        detach: bool = False,
+        loopback: bool = False,
         timeout: int = 120,
     ) -> dict:
         """Run a PowerShell script on a box. The universal escape hatch — anything
         Windows can do, this can do.
 
-        elevated=True runs it with a full (unfiltered) token via a one-shot Scheduled
-        Task (real UAC bypass). as_user=True runs it inside the interactive RDP user's
-        desktop session (for GUI). Returns {stdout, stderr, rc}.
+        elevated=True runs it with a full (unfiltered) token via a one-shot Scheduled Task.
+        as_user=True runs it inside the interactive RDP user's desktop session (for GUI).
+        detach=True launches it fire-and-forget in a Scheduled Task so a background process
+        (e.g. an HTTP server) SURVIVES the session close — a normal run/Start-Process dies
+        with the WinRM Job Object; returns the task + log paths instead of output.
+        loopback=True routes through a Scheduled Task so the script can reach 127.0.0.1
+        (the WinRM network-logon token blocks outbound loopback; the task's logon does not).
+        Returns {stdout, stderr, rc}.
         """
-        r = ctx.exec_ps(script, host=host, elevated=elevated, as_user=as_user, timeout=timeout)
+        if detach:
+            return ctx.run_detached(script, host=host)
+        r = ctx.exec_ps(script, host=host, elevated=elevated, as_user=as_user,
+                        loopback=loopback, timeout=timeout)
         return {"stdout": r.stdout, "stderr": r.stderr, "rc": r.rc}
 
     @mcp.tool

@@ -43,8 +43,9 @@ def register(mcp, ctx) -> None:
         """Write (or append) content to a file on a box.
 
         binary=True treats `content` as base64 and writes the decoded bytes (for arbitrary
-        binary files) — goes over the fast channel (SMB/SFTP) with no size limit; otherwise
-        `content` is UTF-8 text.
+        binary files); otherwise `content` is UTF-8 text. A non-append write streams the
+        bytes over the fast file channel (SMB/SFTP) when available — bypassing the WinRM
+        command channel entirely, with no size limit.
         """
         t = ctx.transport_for(host)
         if binary:

@@ -120,6 +120,43 @@ def run_elevated(
         )
 
 
+def run_detached(transport: Transport, script: str, *, run_as: str = "SYSTEM") -> dict:
+    """Launch ``script`` fire-and-forget in a Scheduled Task and return immediately.
+
+    A process started over WinRM (Start-Process, powershell -File, ...) lives inside the
+    WinRM shell's Job Object and is killed when the session/command ends — so a background
+    server dies after ~1 minute. A Scheduled Task runs the process under the Task Scheduler
+    service, OUTSIDE that Job Object, so it survives the session. Also runs under a
+    service/batch logon (not the WinRM network logon), so it can reach 127.0.0.1.
+    """
+    rid = _rid()
+    task = f"winrdp_bg_{rid}"
+    base = f"{REMOTE_TMP}\\{task}"
+    remote_ps, out_f, err_f = base + ".ps1", base + ".out", base + ".err"
+    wrapper = (
+        "[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
+        f"& {{{script}}} 1> {ps.ps_string(out_f)} 2> {ps.ps_string(err_f)}"
+    )
+    transport.upload(wrapper.encode("utf-8-sig"), remote_ps)
+    arg = f'-NoProfile -ExecutionPolicy Bypass -File "{remote_ps}"'
+    reg = (
+        "$ErrorActionPreference='Stop';"
+        f"$a=New-ScheduledTaskAction -Execute 'powershell.exe' -Argument {ps.ps_string(arg)};"
+        f"$p=New-ScheduledTaskPrincipal -UserId {ps.ps_string(run_as)} -LogonType ServiceAccount -RunLevel Highest;"
+        "$s=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries "
+        "-ExecutionTimeLimit ([TimeSpan]::Zero);"
+        f"Register-ScheduledTask -TaskName {ps.ps_string(task)} -Action $a -Principal $p -Settings $s -Force|Out-Null;"
+        f"Start-ScheduledTask -TaskName {ps.ps_string(task)}"
+    )
+    transport.run_ps(reg, timeout=60).raise_for_status("register detached task")
+    return {
+        "detached": True, "task": task, "stdout_log": out_f, "stderr_log": err_f,
+        "note": ("running outside the WinRM Job Object (survives session close) and with "
+                 "loopback access. Read output with tail_file(stdout_log); stop it with "
+                 f"task_delete('{task}') + kill_process."),
+    }
+
+
 def _safe_read(transport: Transport, path: str) -> str:
     r = transport.run_ps(
         f"if(Test-Path -LiteralPath {ps.ps_string(path)}){{Get-Content -LiteralPath {ps.ps_string(path)} -Raw}}",

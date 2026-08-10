@@ -127,14 +127,18 @@ def register(mcp, ctx) -> None:
 
     @mcp.tool
     def start_process(command: str, host: Optional[str] = None, elevated: bool = False,
-                      as_user: bool = False, wait: bool = False) -> dict:
+                      as_user: bool = False, wait: bool = False, detach: bool = False) -> dict:
         """Launch a program/command on a box. elevated=True for full token, as_user=True
         to launch in the interactive RDP desktop session.
 
-        When wait=False the launched process's stdout/stderr are redirected to log files
-        (returned as stdout_log/stderr_log) so a background process that fails can be
-        diagnosed — inspect them with tail_file. wait=True returns the output directly.
+        detach=True launches it via a Scheduled Task so it SURVIVES the session close (a
+        normal launch dies with the WinRM Job Object) and gets loopback access — use this
+        for a background server. When wait=False the process's stdout/stderr are redirected
+        to log files (stdout_log/stderr_log) for diagnosis via tail_file. wait=True returns
+        the output directly.
         """
+        if detach:
+            return ctx.run_detached(f"& $env:ComSpec /c {ps.ps_string(command)}", host=host)
         if wait:
             r = ctx.exec_ps(command, host=host, elevated=elevated, as_user=as_user, timeout=300)
             return {"stdout": r.stdout, "stderr": r.stderr, "rc": r.rc}
