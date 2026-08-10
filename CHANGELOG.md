@@ -87,6 +87,11 @@ RDP boxes (Win10/11, Server 2016–2025) for Claude & Claude Code.
   audit and live runs: `ensure_remote_dirs` (broke all tool-staging), `tail_file` (returned
   megabytes of provider metadata), and `find_and_click`.
 
+- Readable output: PowerShell serializes its progress/information streams into stderr as
+  a CLIXML blob. Results are now tidied on every call — real Error/Warning text stays in
+  stderr, `Write-Host`/Information output is recovered into stdout (no duplication, no
+  loss), and only the progress-bar noise is dropped.
+
 ### Attribution
 Builds on the MIT-licensed [winremote-mcp](https://github.com/dddabtc/winremote-mcp) and
 [windows-admin-mcp](https://github.com/Cosmicjedi/windows-admin-mcp) — see `NOTICE`.

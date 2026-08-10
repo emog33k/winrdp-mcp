@@ -8,8 +8,46 @@ where an array is expected.
 from __future__ import annotations
 
 import base64
+import html
 import json
+import re
 from typing import Any
+
+# PowerShell serializes its non-output streams (progress, information/Write-Host, verbose)
+# into stderr as a CLIXML blob that makes stderr unreadable. We lose nothing: Error/Warning
+# records become clean stderr, Information (Write-Host) messages are recovered into stdout,
+# and only the pure progress-bar noise is dropped.
+_CLIXML_MSG = re.compile(r'<S S="(?:Error|Warning)">(.*?)</S>', re.S)
+_CLIXML_INFO = re.compile(r'<Obj S="information".*?<ToString>(.*?)</ToString>', re.S)
+
+
+def _clixml_decode(s: str) -> str:
+    s = re.sub(r"_x([0-9A-Fa-f]{4})_", lambda m: chr(int(m.group(1), 16)), s)  # CLIXML char escapes
+    return html.unescape(s)
+
+
+def clean_ps_stderr(stderr: str) -> str:
+    """Reduce a PowerShell CLIXML stderr blob to just its Error/Warning text (or '')."""
+    if not stderr or "#< CLIXML" not in stderr:
+        return stderr
+    msgs = _CLIXML_MSG.findall(stderr)
+    return _clixml_decode("".join(msgs)).strip() if msgs else ""
+
+
+def split_ps_streams(stdout: str, stderr: str) -> tuple[str, str]:
+    """Recover the useful text from a CLIXML stderr blob without losing anything.
+
+    Returns (stdout, stderr): Error/Warning -> stderr; Information/Write-Host lines that
+    aren't already in stdout are appended to stdout; progress noise is dropped.
+    """
+    if not stderr or "#< CLIXML" not in stderr:
+        return stdout, stderr
+    new_stderr = clean_ps_stderr(stderr)
+    infos = [_clixml_decode(m).strip() for m in _CLIXML_INFO.findall(stderr)]
+    extra = [i for i in infos if i and i not in (stdout or "")]
+    if extra:
+        stdout = ((stdout.rstrip("\r\n") + "\n") if (stdout and stdout.strip()) else "") + "\n".join(extra) + "\n"
+    return stdout, new_stderr
 
 
 def encode_command(script: str) -> str:

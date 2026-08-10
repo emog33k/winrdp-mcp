@@ -42,6 +42,12 @@ class ExecResult:
     stderr: str
     rc: int
 
+    def __post_init__(self) -> None:
+        # Tidy PowerShell CLIXML streams: real Error/Warning text stays in stderr,
+        # Write-Host/Information output is recovered into stdout, progress noise is dropped.
+        # No-op for plain (non-CLIXML) stderr.
+        self.stdout, self.stderr = ps.split_ps_streams(self.stdout, self.stderr)
+
     @property
     def ok(self) -> bool:
         return self.rc == 0
