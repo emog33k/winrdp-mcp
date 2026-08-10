@@ -137,7 +137,7 @@ def register(mcp, ctx) -> None:
             "[Convert]::ToBase64String($ms.ToArray())"
         )
         r = ctx.exec_ps(cap, host=host, as_user=True, timeout=60)
-        b64 = "".join(l.strip() for l in r.stdout.splitlines() if l.strip())
+        b64 = "".join(ln.strip() for ln in r.stdout.splitlines() if ln.strip())
         if not b64:
             return {"error": "no image captured (is an RDP session connected?)", "stderr": r.stderr}
         raw = base64.b64decode(b64)

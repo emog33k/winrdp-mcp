@@ -9,9 +9,21 @@ Initial release. A zero-config MCP server that provisions and fully administers 
 RDP boxes (Win10/11, Server 2016–2025) for Claude & Claude Code.
 
 ### Added
-- **136 tools** across 13 groups: hosts/fleet, provisioning & UAC, system, scripting,
+- **144 tools** across 15 groups: hosts/fleet, provisioning & UAC, system, scripting,
   files, admin, RDP, software, network, deeper Windows management, native GUI automation,
-  wait-for-condition helpers, and scheduling/persistence.
+  wait-for-condition helpers, scheduling/persistence, SSH tunneling, and high-level ops.
+- **MCP prompts** (`prompts.py`) — 5 user-invoked workflows: `provision_and_harden`,
+  `diagnose_box`, `security_audit`, `setup_dev_box`, `open_service_locally`.
+- **MCP resources** (`resources.py`) — `winrdp://hosts` (inventory) and
+  `winrdp://host/{alias}/info` (compact live box summary).
+- **Tool profiles** — `WINRDP_PROFILE=full|admin|rdp|core` exposes a curated tool set.
+- **Ops tools** (`ops.py`) — `health_report`, `apply_baseline`, `whoami_priv`,
+  `failed_logons`, `list_open_ports`.
+- **SSH tunneling** (`tunnel.py`) — `port_forward`/`port_forward_list`/`port_forward_stop`
+  to reach a box's loopback service from the operator machine.
+- **Packaging** — installable from PyPI (`pipx install winrdp-mcp`), with manifests for
+  Smithery (`smithery.yaml`), the MCP registry (`server.json`), and a Claude Desktop
+  extension (`dxt/`), plus CI + trusted-publishing GitHub Actions.
 - **Native GUI automation** (`gui.py`) — drive the interactive RDP desktop with no on-box
   agent: `send_keys`, `type_text`, `mouse_move`/`mouse_click`/`mouse_drag`, `list_windows`,
   `focus_window`, UI Automation (`ui_find`/`ui_invoke`/`ui_set_text`), built-in OCR

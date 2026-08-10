@@ -273,7 +273,7 @@ possibly-elevated command line. Where a value is both quoted and validated (e.g.
 
 ### Per-tool allowlist / blocklist
 
-The 136 tools can be narrowed at startup via environment variables (`winrdp_mcp/server.py`):
+The 144 tools can be narrowed at startup via a **profile** (`WINRDP_PROFILE=admin|rdp|core`) or per-tool environment variables (`winrdp_mcp/server.py`):
 
 ```powershell
 # Register ONLY these tools (everything else is not exposed to the client):

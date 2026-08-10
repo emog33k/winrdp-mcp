@@ -1,0 +1,42 @@
+# Smithery deployment manifest — https://smithery.ai/docs
+# winrdp-mcp runs locally as a stdio server (it needs network reach to your boxes and a
+# local encrypted vault), so we expose it as a stdio command with a small config schema.
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    properties:
+      vaultKey:
+        type: string
+        title: Vault key
+        description: >-
+          Fernet key used to encrypt the host inventory at rest (WINRDP_VAULT_KEY).
+          Leave blank to use a machine-local key file. Provide one to share an
+          inventory across machines.
+      profile:
+        type: string
+        title: Tool profile
+        enum: [full, admin, rdp, core]
+        default: full
+        description: >-
+          Which tool set to expose. 'full' = every tool (144); 'admin' = systems
+          administration; 'rdp' = RDP + desktop/GUI; 'core' = the essential subset.
+      debug:
+        type: boolean
+        title: Debug logging
+        default: false
+        description: Verbose logging to stderr.
+    required: []
+  commandFunction: |-
+    (config) => ({
+      command: 'winrdp-mcp',
+      args: ['serve'].concat(config.debug ? ['--debug'] : []),
+      env: Object.assign(
+        {},
+        config.vaultKey ? { WINRDP_VAULT_KEY: config.vaultKey } : {},
+        config.profile ? { WINRDP_PROFILE: config.profile } : {}
+      )
+    })
+  exampleConfig:
+    profile: full
+    debug: false

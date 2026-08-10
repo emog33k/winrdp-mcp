@@ -21,6 +21,9 @@ The complete catalog of every tool exposed by the `winrdp-mcp` FastMCP server. E
 - [GUI](#gui-guipy--15-tools) — `winrdp_mcp/tools/gui.py`
 - [Waiters](#waiters-waiterspy--4-tools) — `winrdp_mcp/tools/waiters.py`
 - [Scheduling](#scheduling-schedulingpy--4-tools) — `winrdp_mcp/tools/scheduling.py`
+- [Tunnel](#tunnel-tunnelpy--3-tools) — `winrdp_mcp/tools/tunnel.py`
+- [Ops](#ops-opspy--5-tools) — `winrdp_mcp/tools/ops.py`
+- [Prompts & resources](#prompts--resources)
 
 ## Safety classification
 
@@ -51,7 +54,9 @@ Tool visibility can be narrowed at startup: `WINRDP_ENABLED_TOOLS` (CSV allow-li
 | GUI | `gui.py` | 15 | 5 | 0 | 10 |
 | Waiters | `waiters.py` | 4 | 4 | 0 | 0 |
 | Scheduling | `scheduling.py` | 4 | 0 | 1 | 3 |
-| **Total** | | **136** | **44** | **23** | **69** |
+| Tunnel | `tunnel.py` | 3 | 1 | 0 | 2 |
+| Ops | `ops.py` | 5 | 4 | 0 | 1 |
+| **Total** | | **144** | **49** | **23** | **72** |
 
 ---
 
@@ -991,3 +996,89 @@ Stop and remove a service previously created with `persist_as_service`.
 ```python
 unpersist_service(name: str, host: Optional[str] = None)
 ```
+
+---
+
+## Tunnel (`tunnel.py`) — 3 tools
+
+Reach a service bound to a box's `127.0.0.1` from the operator machine over an SSH local tunnel. Processes launched over a WinRM network logon can't see the interactive user's loopback, so this is how you test "the box's localhost HTTP". Requires OpenSSH on the box (provisioning installs it when SMB isn't available).
+
+#### `port_forward`
+Open an SSH local tunnel: operator `127.0.0.1:<local_port>` → box's `<remote_host>:<remote_port>`. `local_port=0` picks a free port. Returns the `local_url`.
+```python
+port_forward(remote_port: int, host: Optional[str] = None, local_port: int = 0,
+             remote_host: str = "127.0.0.1")
+```
+
+#### `port_forward_list` — read-only
+List active SSH tunnels opened with `port_forward`.
+```python
+port_forward_list()
+```
+
+#### `port_forward_stop`
+Close an SSH tunnel by its local port.
+```python
+port_forward_stop(local_port: int)
+```
+
+---
+
+## Ops (`ops.py`) — 5 tools
+
+High-level convenience reads/actions that compose what would otherwise be several manual calls: one-call health, a comfortable server baseline, and quick security reads.
+
+#### `health_report` — read-only
+One-call box health: OS/uptime, CPU/RAM, per-disk free, top processes, stopped auto-start services, recent System/Application errors, pending Windows Updates, and Defender status.
+```python
+health_report(host: Optional[str] = None)
+```
+
+#### `apply_baseline`
+Apply a pleasant server baseline — high-performance power plan, no sleep/hibernate, long-path support, hide Server Manager at logon, optional timezone. Runs elevated.
+```python
+apply_baseline(host: Optional[str] = None, timezone: Optional[str] = None,
+               high_performance: bool = True, disable_sleep: bool = True,
+               long_paths: bool = True, hide_server_manager: bool = True)
+```
+
+#### `whoami_priv` — read-only
+Current session's user, groups, integrity level, and token privileges — the quick "what can this session actually do" check.
+```python
+whoami_priv(host: Optional[str] = None)
+```
+
+#### `failed_logons` — read-only
+Recent failed logon attempts (Security event 4625) — account, source IP, logon type.
+```python
+failed_logons(host: Optional[str] = None, count: int = 25)
+```
+
+#### `list_open_ports` — read-only
+Listening TCP ports with the owning process — the box's exposed attack surface.
+```python
+list_open_ports(host: Optional[str] = None, top: int = 100)
+```
+
+---
+
+## Prompts & resources
+
+Beyond tools, the server exposes MCP **prompts** (user-invoked workflows) and **resources** (bounded read-only context). Prompts are defined in `winrdp_mcp/prompts.py`, resources in `winrdp_mcp/resources.py`.
+
+### Prompts
+
+| Name | Arguments | Purpose |
+| --- | --- | --- |
+| `provision_and_harden` | `host, username="Administrator", password="", alias=""` | Bring a new box under management and lock it down, step by step. |
+| `diagnose_box` | `host=""` | Gather health evidence and give a prioritized root-cause summary. |
+| `security_audit` | `host=""` | Read-only posture review → risk-ranked findings with remediations. |
+| `setup_dev_box` | `host="", runtimes="python,node,git"` | Install runtimes/tools and verify a working dev environment. |
+| `open_service_locally` | `host, remote_port, note=""` | Reach a box's loopback service from your machine over an SSH tunnel. |
+
+### Resources
+
+| URI | Kind | Contents |
+| --- | --- | --- |
+| `winrdp://hosts` | static | The registered inventory (passwords redacted) and which host is active. |
+| `winrdp://host/{alias}/info` | template | A compact live summary of one box (OS, build, CPU/RAM, disks, uptime). |

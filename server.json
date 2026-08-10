@@ -1,0 +1,46 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-07-09/server.schema.json",
+  "name": "io.github.emog33k/winrdp-mcp",
+  "description": "Zero-config MCP server to provision and fully administer any Windows RDP box (Win10/11/Server) over WinRM/SSH/SMB.",
+  "status": "active",
+  "repository": {
+    "url": "https://github.com/emog33k/winrdp-mcp",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "websiteUrl": "https://github.com/emog33k/winrdp-mcp",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "winrdp-mcp",
+      "version": "0.1.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "runtimeArguments": [
+        {
+          "type": "positional",
+          "value": "serve",
+          "valueHint": "serve",
+          "isRequired": true,
+          "description": "Run the MCP server in controller mode (stdio)."
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "WINRDP_VAULT_KEY",
+          "description": "Optional Fernet key to encrypt the host inventory at rest. Omit to use a machine-local key file.",
+          "isRequired": false,
+          "isSecret": true
+        },
+        {
+          "name": "WINRDP_PROFILE",
+          "description": "Tool profile to expose: full (default), admin, rdp, or core.",
+          "isRequired": false,
+          "default": "full"
+        }
+      ]
+    }
+  ]
+}

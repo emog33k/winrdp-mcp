@@ -7,6 +7,10 @@ build/
 dist/
 *.whl
 
+# DXT / MCP Bundle build output (vendored deps + packaged extension)
+dxt/server/lib/
+*.dxt
+
 # Virtual environments
 .venv/
 venv/

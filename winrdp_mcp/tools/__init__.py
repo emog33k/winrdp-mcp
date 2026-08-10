@@ -2,8 +2,23 @@
 
 from __future__ import annotations
 
-from . import (admin, files, gui, hosts, network, ops, provisioning, rdp, scheduling,
-               scripting, software, system, tunnel, waiters, windows)
+from . import (
+    admin,
+    files,
+    gui,
+    hosts,
+    network,
+    ops,
+    provisioning,
+    rdp,
+    scheduling,
+    scripting,
+    software,
+    system,
+    tunnel,
+    waiters,
+    windows,
+)
 
 MODULES = [hosts, provisioning, system, scripting, files, admin, rdp, software, network,
            windows, gui, waiters, scheduling, tunnel, ops]

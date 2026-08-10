@@ -363,7 +363,7 @@ def register(mcp, ctx) -> None:
         )
         r = ctx.exec_ps(script, host=host, as_user=True, timeout=max(90, frames * 2 + 60))
         import base64
-        b64 = "".join(l.strip() for l in r.stdout.splitlines() if l.strip())
+        b64 = "".join(ln.strip() for ln in r.stdout.splitlines() if ln.strip())
         if not b64:
             return {"error": "no recording captured (is an interactive session connected?)", "stderr": r.stderr}
         raw = base64.b64decode(b64)

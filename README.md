@@ -2,12 +2,13 @@
 
 **A zero-config [MCP](https://modelcontextprotocol.io) server that provisions and fully administers any Windows RDP box — Windows 10/11 and Server 2016–2025 — for Claude and Claude Code.**
 
+[![PyPI](https://img.shields.io/pypi/v/winrdp-mcp.svg)](https://pypi.org/project/winrdp-mcp/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![Platform: Windows](https://img.shields.io/badge/Target-Windows%2010%2F11%20%7C%20Server%202016--2025-0078D6.svg)](#)
 [![MCP: FastMCP](https://img.shields.io/badge/MCP-FastMCP-6E56CF.svg)](https://github.com/jlowin/fastmcp)
 
-You give it a host and admin credentials. It makes the box remotely manageable *by itself* — turning on WinRM, opening the Windows firewall, and fixing local-admin token filtering — regardless of the box's starting state or Windows version. Claude then gets **136 tools**: shell, files, registry, services, processes, scheduled tasks, users, firewall, event logs, software, networking, live RDP control, screenshots, real UAC elevation, and on-demand tool staging.
+You give it a host and admin credentials. It makes the box remotely manageable *by itself* — turning on WinRM, opening the Windows firewall, and fixing local-admin token filtering — regardless of the box's starting state or Windows version. Claude then gets **144 tools**: shell, files, registry, services, processes, scheduled tasks, users, firewall, event logs, software, networking, live RDP control, screenshots, GUI automation, real UAC elevation, one-call health/security reports, and on-demand tool staging — plus **5 guided workflows** (prompts) and **live host resources**.
 
 **Nothing is pre-installed on the target.** The controller reaches boxes over WinRM / SSH / SMB from wherever Claude Code runs, and manages one box or a whole fleet from a single server.
 
@@ -15,9 +16,11 @@ You give it a host and admin credentials. It makes the box remotely manageable *
 
 - **Zero-config provisioning.** `provision_host` climbs a ladder — WinRM → SSH → SMB/WMI cold-start → paste-once bootstrap — and makes a fresh, locked-down box manageable with no manual WinRM setup.
 - **Real UAC / elevation, not "please run as admin."** Over WinRM a local admin gets a high-integrity full token and elevated ops run directly; a filtered token falls back to a one-shot `SYSTEM` Scheduled Task. `as_user=True` runs inside the interactive RDP desktop.
-- **136 tools across 13 modules**, every one with `readOnlyHint` / `destructiveHint` safety annotations so MCP clients can gate destructive actions automatically.
+- **144 tools across 15 modules**, every one with `readOnlyHint` / `destructiveHint` safety annotations so MCP clients can gate destructive actions automatically. Narrow the surface to a focused set with a **tool profile** (`WINRDP_PROFILE=admin|rdp|core`).
+- **Guided workflows & live context.** 5 MCP **prompts** (`provision_and_harden`, `diagnose_box`, `security_audit`, `setup_dev_box`, `open_service_locally`) turn a whole operation into one click, and **resources** (`winrdp://hosts`, `winrdp://host/{alias}/info`) hand the model the inventory and a live box summary without spending a tool call.
 - **On-demand code execution.** `run_python` finds or installs Python, pip-installs deps, runs your code, and cleans up — same for Node, PowerShell, cmd, and batch. `stage_tool` pulls Sysinternals (or any URL/local file) onto the box mid-task.
 - **Native GUI automation.** Drive the interactive RDP desktop — keystrokes, mouse, and UI Automation (find/click/read controls by name) — plus live screenshots, with no on-box agent.
+- **One-call ops.** `health_report` (OS/CPU/RAM/disk/services/errors/updates/Defender in one read), `apply_baseline` (high-perf power plan, no sleep, long paths), `whoami_priv`, `failed_logons`, `list_open_ports`.
 - **First-class RDP** and an **encrypted multi-host inventory** (Fernet) with tags and parallel fan-out across the fleet.
 
 ### Two modes, one package
@@ -52,10 +55,20 @@ Both build the *same* server; `python -m winrdp_mcp serve` is equivalent to the 
 Python **3.10+** on the operator machine (Windows, macOS, or Linux). Targets are Windows.
 
 ```bash
-pip install -e .                     # from a checkout of this repo
-pip install -e ".[bootstrap]"        # + impacket, for SMB/WMI cold-start of boxes with WinRM AND SSH off
-pip install -e ".[agent-ui]"         # + on-box interactive-desktop UI agent (click/type/OCR)
+pipx install winrdp-mcp              # isolated, recommended — gives you the `winrdp-mcp` command
+uvx winrdp-mcp serve                 # zero-install run via uv
+pip install winrdp-mcp               # plain pip
 ```
+
+Optional extras and a local dev checkout:
+
+```bash
+pip install "winrdp-mcp[bootstrap]"  # + impacket, for SMB/WMI cold-start of boxes with WinRM AND SSH off
+pip install "winrdp-mcp[agent-ui]"   # + on-box interactive-desktop UI agent (click/type/OCR)
+pip install -e ".[dev]"              # from a checkout of this repo (tests + ruff)
+```
+
+**Claude Desktop, one click:** grab `winrdp-mcp.dxt` from [Releases](https://github.com/emog33k/winrdp-mcp/releases) and open it (Settings → Extensions → Install from file), or build it yourself with `pwsh dxt/build.ps1`.
 
 ### 2. Register with Claude Code
 
@@ -65,8 +78,9 @@ Drop a project `.mcp.json` at your repo root:
 {
   "mcpServers": {
     "winrdp": {
-      "command": "python",
-      "args": ["-m", "winrdp_mcp", "serve"]
+      "command": "winrdp-mcp",
+      "args": ["serve"],
+      "env": { "WINRDP_VAULT_KEY": "change-me", "WINRDP_PROFILE": "full" }
     }
   }
 }
@@ -78,7 +92,7 @@ Or register from the CLI:
 claude mcp add winrdp -- winrdp-mcp serve
 ```
 
-Set `WINRDP_VAULT_KEY` to a strong passphrase — it encrypts stored credentials at rest (see [Configuration](#configuration)).
+Set `WINRDP_VAULT_KEY` to a strong passphrase — it encrypts stored credentials at rest (see [Configuration](#configuration)). Set `WINRDP_PROFILE` to `admin`, `rdp`, or `core` to expose a focused tool set instead of all 144.
 
 ### 3. The 30-second flow
 
@@ -98,7 +112,7 @@ If the box has only RDP open, `provision_host` returns a `bootstrap_oneliner` to
 
 ## Tool groups
 
-**136 tools** across thirteen modules. The full catalog — every signature, parameter, default, and safety class — is in **[docs/TOOLS.md](docs/TOOLS.md)**.
+**144 tools** across fifteen modules. The full catalog — every signature, parameter, default, and safety class — is in **[docs/TOOLS.md](docs/TOOLS.md)**.
 
 | Group | Module | # | What it covers |
 |-------|--------|--:|----------------|
@@ -115,8 +129,35 @@ If the box has only RDP open, `provision_host` returns a `bootstrap_oneliner` to
 | **GUI** | `gui.py` | 15 | windows/keyboard/mouse (`send_keys`, `type_text`, `mouse_click`, `mouse_drag`), UI Automation (`ui_find`/`ui_invoke`/`ui_set_text`), `ocr_screen`, `find_and_click`, `wait_for_window`, `record_screen`, `gui_script` |
 | **Waiters** | `waiters.py` | 4 | `wait_for_port`, `wait_for_service`, `wait_for_process`, `wait_for_file` — block until a condition holds |
 | **Scheduling** | `scheduling.py` | 4 | `schedule_command`, `run_at_startup`, `persist_as_service` (NSSM auto-restart), `unpersist_service` |
+| **Tunnel** | `tunnel.py` | 3 | `port_forward`, `port_forward_stop`, `port_forward_list` — SSH local-forward a box's service to your machine |
+| **Ops** | `ops.py` | 5 | `health_report`, `apply_baseline`, `whoami_priv`, `failed_logons`, `list_open_ports` — one-call health & security reads |
 
-Safety classification across all 136: **44 read-only**, **23 destructive**, **69 mutating**. Read-only tools are safe to auto-run; destructive tools carry `destructiveHint=True` so clients gate them behind confirmation.
+Safety classification across all 144: **49 read-only**, **23 destructive**, **72 mutating**. Read-only tools are safe to auto-run; destructive tools carry `destructiveHint=True` so clients gate them behind confirmation.
+
+### Prompts & resources
+
+Beyond tools, the server exposes MCP **prompts** (user-invoked, one-click operations that steer the model through the right tool sequence) and **resources** (bounded read-only context the client can hand the model for free):
+
+| Kind | Name | What it does |
+|------|------|--------------|
+| Prompt | `provision_and_harden(host, username, password, alias)` | Bring a new box under management and lock it down, step by step |
+| Prompt | `diagnose_box(host)` | Gather health evidence and give a prioritized root-cause summary |
+| Prompt | `security_audit(host)` | Read-only posture review → risk-ranked findings + remediations |
+| Prompt | `setup_dev_box(host, runtimes)` | Install runtimes/tools and verify a working dev environment |
+| Prompt | `open_service_locally(host, remote_port, note)` | Reach a box's loopback service from your machine over an SSH tunnel |
+| Resource | `winrdp://hosts` | The registered inventory (passwords redacted) + active host |
+| Resource | `winrdp://host/{alias}/info` | A compact live summary of one box (OS, build, CPU/RAM, disks, uptime) |
+
+### Tool profiles
+
+`WINRDP_PROFILE` selects which modules to expose, so the model's tool list stays focused:
+
+| Profile | Tools | Includes |
+|---------|------:|----------|
+| `full` (default) | 144 | everything |
+| `admin` | 117 | systems administration (no GUI/RDP-desktop, no bare tunnel) |
+| `rdp` | 104 | RDP + desktop/GUI focus |
+| `core` | 87 | the essential subset (hosts, provisioning, system, scripting, files, admin, ops, waiters) |
 
 ---
 
@@ -213,6 +254,7 @@ All configuration is via environment variables (set them in the `env` block of y
 | `WINRDP_VAULT_KEY` | Passphrase (or raw Fernet key) that encrypts stored passwords. A passphrase is SHA-256-derived into a key. If unset, a machine-local `vault.key` (owner-only) is generated. **Set it.** |
 | `WINRDP_HOME` | Override the data directory holding `inventory.json` and `vault.key` (default `%APPDATA%\winrdp-mcp`). |
 | `WINRDP_DEBUG` | `1`/`true`/`yes` → verbose DEBUG logging to **stderr** (equivalent to `--debug`). |
+| `WINRDP_PROFILE` | Tool profile to expose: `full` (default, 144), `admin` (117), `rdp` (104), or `core` (87). |
 | `WINRDP_ENABLED_TOOLS` | CSV allowlist — if set, **only** these tools are registered. |
 | `WINRDP_DISABLED_TOOLS` | CSV blocklist — these tools are skipped (e.g. `reboot,file_delete`). |
 | `WINRDP_WINRM_OP_TIMEOUT` | WinRM per-operation timeout in seconds (default `180`; read timeout is derived as `+30`). |
@@ -243,7 +285,7 @@ Full threat model, credential-vault internals, log redaction, argument-injection
 | **[docs/SECURITY.md](docs/SECURITY.md)** | Threat model, trust boundary, credential handling, transport/MITM, the enable-WinRM script, argument-injection defense, hardening checklist. |
 | **[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** | Symptom → cause → fix for the failure modes you actually hit (provision failures, connection drops, slow elevation, Python/Node install, SSH banner, 5986 certs, MCP registration). |
 | **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** | Internal map for contributors: transports → PowerShell marshaling → provisioning → elevation → context → vault → tooling → server assembly. |
-| **[docs/TOOLS.md](docs/TOOLS.md)** | The complete reference for all 136 tools — signatures, parameters, defaults, and safety class. |
+| **[docs/TOOLS.md](docs/TOOLS.md)** | The complete reference for all 144 tools — signatures, parameters, defaults, and safety class. |
 
 ---
 

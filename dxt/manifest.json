@@ -1,0 +1,53 @@
+{
+  "dxt_version": "0.1",
+  "name": "winrdp-mcp",
+  "display_name": "Windows RDP Admin",
+  "version": "0.1.0",
+  "description": "Provision and fully administer any Windows RDP box (Win10/11/Server) over WinRM/SSH/SMB.",
+  "long_description": "Zero-config MCP server that brings a Windows box under management with one call and then exposes 144 tools to run it: elevated PowerShell/Python, files and fast transfer, RDP control, desktop/GUI automation, networking, scheduling, and security ops. Built for Claude and Claude Code.",
+  "author": {
+    "name": "Sol",
+    "url": "https://github.com/emog33k/winrdp-mcp"
+  },
+  "homepage": "https://github.com/emog33k/winrdp-mcp",
+  "documentation": "https://github.com/emog33k/winrdp-mcp/tree/master/docs",
+  "support": "https://github.com/emog33k/winrdp-mcp/issues",
+  "license": "MIT",
+  "keywords": ["windows", "rdp", "winrm", "ssh", "sysadmin", "provisioning", "automation"],
+  "server": {
+    "type": "python",
+    "entry_point": "server/lib/winrdp_mcp/__main__.py",
+    "mcp_config": {
+      "command": "python",
+      "args": ["-m", "winrdp_mcp", "serve"],
+      "env": {
+        "PYTHONPATH": "${__dirname}/server/lib",
+        "WINRDP_PROFILE": "${user_config.profile}",
+        "WINRDP_VAULT_KEY": "${user_config.vault_key}"
+      }
+    }
+  },
+  "user_config": {
+    "profile": {
+      "type": "string",
+      "title": "Tool profile",
+      "description": "Which tool set to expose: full (144 tools), admin, rdp, or core.",
+      "default": "full",
+      "required": false
+    },
+    "vault_key": {
+      "type": "string",
+      "title": "Vault key (optional)",
+      "description": "Fernet key to encrypt the host inventory at rest. Leave blank to use a machine-local key file.",
+      "sensitive": true,
+      "required": false
+    }
+  },
+  "compatibility": {
+    "claude_desktop": ">=0.10.0",
+    "platforms": ["win32", "darwin", "linux"],
+    "runtimes": {
+      "python": ">=3.10.0"
+    }
+  }
+}
