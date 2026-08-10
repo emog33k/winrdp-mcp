@@ -6,7 +6,7 @@ import os
 
 from fastmcp import FastMCP
 
-from . import __version__, log
+from . import __version__, log, prompts, resources
 from .context import Context
 from .tools import register_all
 from .vault import Host
@@ -51,6 +51,7 @@ READONLY = {
     "list_installed_software", "rdp_connection_file", "list_windows", "ui_find",
     "wait_for_port", "wait_for_service", "wait_for_process", "wait_for_file",
     "wait_for_window", "tail_file", "ocr_screen", "record_screen", "port_forward_list",
+    "health_report", "whoami_priv", "failed_logons", "list_open_ports",
 }
 
 # Destructive tools: delete data, kill processes, cut access, or reboot. Clients should
@@ -126,6 +127,10 @@ def build_server(*, local: bool = False, seed_host: Host | None = None,
 
         return JSONResponse({"status": "ok", "version": __version__, "hosts": len(ctx.vault.all())})
 
-    register_all(mcp, ctx)
-    _log.info("winrdp-mcp %s ready (%d hosts in inventory)", __version__, len(ctx.vault.all()))
+    profile = os.environ.get("WINRDP_PROFILE", "full").strip() or "full"
+    register_all(mcp, ctx, profile=profile)
+    prompts.register(mcp, ctx)
+    resources.register(mcp, ctx)
+    _log.info("winrdp-mcp %s ready (profile=%s, %d hosts in inventory)",
+              __version__, profile, len(ctx.vault.all()))
     return mcp, ctx
