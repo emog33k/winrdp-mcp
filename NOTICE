@@ -1,0 +1,22 @@
+winrdp-mcp
+==========
+
+Copyright (c) 2026 winrdp-mcp contributors. MIT License (see LICENSE).
+
+This project's feature set, risk-tier model, and optional interactive-desktop UI agent
+build on prior MIT-licensed work, gratefully credited:
+
+* winremote-mcp — https://github.com/dddabtc/winremote-mcp
+    Copyright (c) 2025 winremote contributors. MIT License.
+    Basis for: the on-box tool surface (desktop/registry/services/process/file/network
+    tools), the tier1/tier2/tier3 risk model, and the optional `deploy_ui_agent` path,
+    which installs and drives winremote-mcp for click/type/OCR desktop control.
+
+* windows-admin-mcp — https://github.com/Cosmicjedi/windows-admin-mcp
+    Copyright (c) 2025 Cosmicjedi. MIT License.
+    Basis for: the WinRM-primary / SSH-fallback remote administration approach and the
+    diagnose/execute/troubleshoot tool shape.
+
+winrdp-mcp's own additions: zero-config provisioning ladder (WinRM -> SSH -> SMB/WMI
+cold-start -> paste-once bootstrap), real UAC/elevation via one-shot Scheduled Tasks,
+on-demand tool staging, encrypted multi-host inventory, and first-class RDP control.

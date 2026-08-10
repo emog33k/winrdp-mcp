@@ -1,0 +1,14 @@
+{
+  "//": "Add this to your Claude Code / Claude Desktop MCP config.",
+  "//1": "Claude Code: put under \"mcpServers\" in ~/.claude.json or run: claude mcp add ...",
+  "//2": "WINRDP_VAULT_KEY encrypts stored credentials; use a strong passphrase.",
+  "mcpServers": {
+    "winrdp": {
+      "command": "winrdp-mcp",
+      "args": ["serve"],
+      "env": {
+        "WINRDP_VAULT_KEY": "change-me-to-a-long-random-passphrase"
+      }
+    }
+  }
+}

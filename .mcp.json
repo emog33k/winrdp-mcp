@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "winrdp": {
+      "command": "python",
+      "args": ["-m", "winrdp_mcp", "serve"]
+    }
+  }
+}

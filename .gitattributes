@@ -1,0 +1,8 @@
+# Normalize line endings across platforms
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.png binary
+*.jpg binary
+*.whl binary

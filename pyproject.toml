@@ -1,0 +1,64 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "winrdp-mcp"
+version = "0.1.0"
+description = "Zero-config MCP server to provision and fully administer any Windows RDP box (Win10/11/Server) — built for Claude & Claude Code."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [{ name = "Sol" }]
+keywords = ["mcp", "windows", "rdp", "winrm", "ssh", "remote", "provisioning", "claude"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Systems Administration",
+]
+
+# Core deps: controller mode needs nothing on the target box beyond WinRM/SSH/SMB.
+dependencies = [
+    "fastmcp>=2.3.0",
+    "pywinrm>=0.4.3",
+    "requests>=2.31.0",
+    "requests-ntlm>=1.2.0",
+    "paramiko>=3.4.0",
+    "smbprotocol>=1.12.0",
+    "cryptography>=42.0.0",
+    "click>=8.1.0",
+]
+
+[project.optional-dependencies]
+# Cold-start bootstrap of a box where WinRM/SSH are both OFF (runs a command over
+# DCOM/WMI or SMB service control to turn WinRM on). Heavy, so it is opt-in.
+bootstrap = ["impacket>=0.11.0"]
+# Rich interactive desktop UI control (click/type/OCR) via the vendored on-box agent.
+agent-ui = ["winremote-mcp>=0.4.0"]
+dev = ["ruff>=0.6.0", "pytest>=8.0.0"]
+
+[project.scripts]
+winrdp-mcp = "winrdp_mcp.__main__:cli"
+winrdp = "winrdp_mcp.__main__:cli"
+
+[project.urls]
+Homepage = "https://github.com/markusvogell/winrdp-mcp"
+
+[tool.hatch.build.targets.wheel]
+packages = ["winrdp_mcp"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"scripts" = "winrdp_mcp/_scripts"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"

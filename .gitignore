@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+*.whl
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Test / tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+.coverage.*
+
+# winrdp runtime state (never commit — holds the encrypted inventory + vault key)
+# The real data dir is %APPDATA%\winrdp-mcp (or $WINRDP_HOME); guard against a local copy.
+winrdp-mcp-data/
+*.vault.key
+inventory.json
+
+# Local secrets / overrides — keep the checked-in .mcp.json secret-free
+.mcp.local.json
+.env
+*.local
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
