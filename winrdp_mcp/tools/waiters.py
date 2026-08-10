@@ -17,18 +17,29 @@ def register(mcp, ctx) -> None:
     def _poll(check, want, host, timeout, interval, extra=None):
         start = time.time()
         deadline = start + timeout
+        last_error = None
         while True:
             try:
                 cur = check()
+            except KeyError as e:  # unknown host alias etc. — not going to fix itself; fail fast
+                return {"reached": False, "error": str(e), "waited_s": round(time.time() - start, 1)}
             except Exception as e:  # noqa: BLE001
                 cur = {"_error": str(e)}
-            if isinstance(cur, dict) and cur.get("_match") == want:
-                out = {"reached": True, "waited_s": round(time.time() - start, 1)}
-                out.update({k: v for k, v in cur.items() if not k.startswith("_")})
-                return out
+            if isinstance(cur, dict):
+                if cur.get("_match") == want:
+                    out = {"reached": True, "waited_s": round(time.time() - start, 1)}
+                    out.update({k: v for k, v in cur.items() if not k.startswith("_")})
+                    return out
+                if cur.get("_error"):
+                    last_error = cur["_error"]
             if time.time() >= deadline:
-                return {"reached": False, "waited_s": round(time.time() - start, 1),
-                        "timeout_s": timeout, **(extra or {})}
+                # Surface the last error so a timeout that was really an auth/connection
+                # failure isn't reported as a bland "not reached".
+                res = {"reached": False, "waited_s": round(time.time() - start, 1),
+                       "timeout_s": timeout, **(extra or {})}
+                if last_error:
+                    res["last_error"] = last_error
+                return res
             time.sleep(interval)
 
     @mcp.tool

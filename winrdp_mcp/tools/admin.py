@@ -6,7 +6,7 @@ import binascii
 import os
 from typing import Optional
 
-from .. import log, ps
+from .. import ps
 from ..config import REMOTE_TMP
 from . import _validate as V
 
@@ -232,10 +232,12 @@ def register(mcp, ctx) -> None:
                     administrator: bool = False, rdp: bool = True,
                     never_expires: bool = True) -> dict:
         """Create a local user; optionally add to Administrators and Remote Desktop Users."""
-        log.register_secret(password)  # scrub it from any debug log line
         never = " -PasswordNeverExpires:$true" if never_expires else ""
+        # The password is passed via `secrets` (staged to an admin-only file and read into
+        # $pw on the box) rather than inlined, so it never lands on the target command line /
+        # Event 4688.
         lines = [
-            f"$sec=ConvertTo-SecureString {ps.ps_string(password)} -AsPlainText -Force",
+            "$sec=ConvertTo-SecureString $pw -AsPlainText -Force",
             f"if(Get-LocalUser -Name {ps.ps_string(username)} -ErrorAction SilentlyContinue){{"
             f"Set-LocalUser -Name {ps.ps_string(username)} -Password $sec}}else{{"
             f"New-LocalUser -Name {ps.ps_string(username)} -Password $sec{never} -AccountNeverExpires|Out-Null}}",
@@ -248,7 +250,7 @@ def register(mcp, ctx) -> None:
                 f"Add-LocalGroupMember -Group 'Remote Desktop Users' -Member {ps.ps_string(username)} -ErrorAction SilentlyContinue")
         lines.append("$result=@{created=$true;user=" + ps.ps_string(username) +
                      ";administrator=$" + str(administrator).lower() + ";rdp=$" + str(rdp).lower() + "}")
-        return ctx.exec_json(";".join(lines), host=host, elevated=False)
+        return ctx.exec_json(";".join(lines), host=host, elevated=False, secrets={"pw": password})
 
     @mcp.tool
     def user_delete(username: str, host: Optional[str] = None) -> dict:
@@ -309,8 +311,6 @@ def register(mcp, ctx) -> None:
         specific account. Runs elevated."""
         startmap = {"auto": "Automatic", "demand": "Manual", "manual": "Manual", "disabled": "Disabled"}
         V.enum(start, set(startmap), "start")
-        if password:
-            log.register_secret(password)
         # Use New-Service with properly quoted args (no cmd/sc quoting to break; a `"`/`$`
         # in a value can't inject).
         lines = [
@@ -319,17 +319,20 @@ def register(mcp, ctx) -> None:
         ]
         if display_name:
             lines.append(f"$sp['DisplayName']={ps.ps_string(display_name)}")
+        secrets = None
         if run_as:
             if password:
+                # $pw is read on the box from an admin-only file (see secrets=), never inlined.
+                secrets = {"pw": password}
                 lines.append(
                     f"$sp['Credential']=New-Object PSCredential({ps.ps_string(run_as)},"
-                    f"(ConvertTo-SecureString {ps.ps_string(password)} -AsPlainText -Force))"
+                    "(ConvertTo-SecureString $pw -AsPlainText -Force))"
                 )
             else:
                 lines.append(f"$sp['Credential']=New-Object PSCredential({ps.ps_string(run_as)},"
                              "(New-Object Security.SecureString))")
         lines.append("New-Service @sp|Out-Null;$result=@{ok=$true;name=" + ps.ps_string(name) + "}")
-        return ctx.exec_json(";".join(lines), host=host, elevated=True, timeout=60)
+        return ctx.exec_json(";".join(lines), host=host, elevated=True, timeout=60, secrets=secrets)
 
     @mcp.tool
     def service_delete(name: str, host: Optional[str] = None) -> dict:
@@ -355,6 +358,9 @@ def register(mcp, ctx) -> None:
     def write_event(message: str, host: Optional[str] = None, log: str = "Application",
                     source: str = "winrdp-mcp", event_id: int = 1000, level: str = "Information") -> dict:
         """Write an entry to a Windows event log (creates the source if needed). Elevated."""
+        # `level` is spliced raw into an elevated (SYSTEM) command — validate it against the
+        # allowed EntryType set so it can't inject PowerShell.
+        V.enum(level, {"Information", "Warning", "Error", "SuccessAudit", "FailureAudit"}, "level")
         body = (
             f"if(-not [Diagnostics.EventLog]::SourceExists({ps.ps_string(source)})){{"
             f"New-EventLog -LogName {ps.ps_string(log)} -Source {ps.ps_string(source)}}};"

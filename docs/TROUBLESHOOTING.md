@@ -78,8 +78,8 @@ you the paste-once one-liner (Rung 4). The SMB+WMI cold-start (Rung 3) additiona
 
    Paste that into the box (elevated), then re-run `provision_host`. The decoded script is
    idempotent: it enables PSRemoting, sets WinRM to Automatic + starts it, runs
-   `winrm quickconfig`, allows Basic/AllowUnencrypted + `TrustedHosts=*`, sets
-   `LocalAccountTokenFilterPolicy=1`, and opens the 5985 firewall rule.
+   `winrm quickconfig`, sets `LocalAccountTokenFilterPolicy=1`, and opens the 5985 firewall
+   rule. (It does not touch Basic/AllowUnencrypted/TrustedHosts — NTLM needs none of them.)
 
 4. If **445 and 135** are open but the cold-start rung was skipped with
    `wmi-bootstrap-unavailable`, install the optional extra on the controller:
@@ -488,8 +488,7 @@ Windows build of the target, and the box's RAM/vCPU (thrashing is size-related �
 | **VM size** | **≥ 4 GB RAM / 2 vCPU.** 2 GB thrashes under sustained WinRM load (Defender + TiWorker peg CPU/RAM after installs). |
 | **Transport** | WinRM over **HTTPS 5986** with `winrm_cert_validation="validate"` and a trusted cert. |
 | **SSH** | `ssh_host_key_policy="reject"` (known_hosts only) instead of trust-on-first-use. |
-| **TrustedHosts** | The enable script sets `TrustedHosts=*` for first contact. Scope it to your actual hosts afterward. |
-| **AllowUnencrypted / Basic** | The enable script turns these on for bootstrap. On NTLM the payload is encrypted regardless; tighten (disable Basic/AllowUnencrypted) once on HTTPS. |
+| **TrustedHosts / AllowUnencrypted / Basic** | Not set by provisioning (0.1.1+) — NTLM encrypts the payload without them. If you provisioned with ≤ 0.1.0, undo them: `Set-Item WSMan:\localhost\Service\Auth\Basic $false`, `…\AllowUnencrypted $false`, `Clear-Item WSMan:\localhost\Client\TrustedHosts -Force`. |
 | **Vault key** | Set `WINRDP_VAULT_KEY` to a strong passphrase; it encrypts stored passwords (Fernet). Without it a machine-local `vault.key` is used. |
 | **Per-op timeout** | `WINRDP_WINRM_OP_TIMEOUT` (seconds, default 180; read timeout = +30). Raise for slow boxes. |
 | **Tool surface** | Restrict with `WINRDP_ENABLED_TOOLS` (CSV allowlist) / `WINRDP_DISABLED_TOOLS` (CSV blocklist, e.g. `reboot,file_delete`). |

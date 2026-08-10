@@ -194,18 +194,20 @@ setup**, so first contact is deliberately permissive. Two things to know:
 
 - **Per-host security fields default to permissive** (`winrdp_mcp/vault.py`):
   `winrm_cert_validation="ignore"` and `ssh_host_key_policy="auto"` (trust-on-first-use).
-- **The provisioning enable script** (`ENABLE_WINRM_PS` in `winrdp_mcp/provision.py`) sets,
-  on the target: `AllowUnencrypted=$true`, `Auth\Basic=$true`, `Client\TrustedHosts='*'`,
-  and `LocalAccountTokenFilterPolicy=1`, opens the firewall for 5985, and flips any `Public`
-  network profile to `Private`.
+- **The provisioning enable script** (`ENABLE_WINRM_PS` in `winrdp_mcp/provision.py`) sets, on
+  the target, `LocalAccountTokenFilterPolicy=1`, opens the firewall for 5985, and flips any
+  `Public` network profile to `Private`. It does **not** set `AllowUnencrypted`, `Auth\Basic`,
+  or `TrustedHosts='*'` (0.1.1+) — NTLM doesn't need them (≤ 0.1.0 did set them).
 
-This is what lets `provision_host` "just work" on a fresh box. On an **untrusted network it
-allows an on-path attacker to MITM the session** — acceptable for a lab or a box you reach
-over a trusted link, not for production over the open internet.
+This is what lets `provision_host` "just work" on a fresh box. With HTTPS off and
+`winrm_cert_validation="ignore"`, an **untrusted network still allows an on-path attacker to
+MITM the session** — acceptable for a lab or a box you reach over a trusted link, not for
+production over the open internet.
 
 Important nuance: over HTTP 5985 with **NTLM** auth, the *payload is still encrypted* by
-NTLM's message sealing. `AllowUnencrypted` / `Basic` only weaken things if you actually use
-**Basic** auth (which sends credentials in the clear). Keep `winrm_auth="ntlm"` (the
+NTLM's message sealing. That is why provisioning leaves Basic/`AllowUnencrypted` off; only if
+you explicitly select **Basic** auth (which sends credentials in the clear) do they matter.
+Keep `winrm_auth="ntlm"` (the
 default) and the 5985 path is confidential, if not authenticated against MITM.
 
 ### Production WinRM: HTTPS on 5986 with certificate validation
@@ -234,20 +236,19 @@ operator's `known_hosts` are accepted); the default `"auto"` is `AutoAddPolicy`
 (trust-on-first-use). Pre-populate `known_hosts` out of band, then set `"reject"` so a
 swapped host key fails the connection instead of being silently trusted.
 
-### Scope `TrustedHosts` and the firewall
+### Scope the firewall (and undo legacy settings)
 
-The bootstrap sets `TrustedHosts='*'` on the **target** for frictionless first contact. Once
-the box is reachable, tighten it to only the operator hosts that legitimately connect, and
-restrict the 5985/5986 firewall rule to the operator's source IPs. Example, run on the box
-via `run_powershell(elevated=True)` or in an RDP session:
+Provisioning (0.1.1+) no longer sets `TrustedHosts='*'`, `AllowUnencrypted`, or `Basic`, so
+there's nothing to undo on a freshly provisioned box — just restrict the 5985/5986 firewall
+rule to the operator's source IPs at the provider firewall. If you provisioned a box with an
+older version (≤ 0.1.0), tighten it, run on the box via `run_powershell(elevated=True)` or in
+an RDP session:
 
 ```powershell
-# Restrict which clients this box will accept over WinRM
-Set-Item WSMan:\localhost\Client\TrustedHosts -Value 'operator1.corp.example,10.20.0.5' -Force
-
-# If you moved to HTTPS-only, disable unencrypted and Basic again:
-Set-Item WSMan:\localhost\Service\AllowUnencrypted -Value $false
-Set-Item WSMan:\localhost\Service\Auth\Basic       -Value $false
+# Legacy cleanup (only needed if provisioned with <= 0.1.0):
+Clear-Item WSMan:\localhost\Client\TrustedHosts -Force   # or scope: -Value 'operator1,10.20.0.5'
+Set-Item   WSMan:\localhost\Service\AllowUnencrypted -Value $false
+Set-Item   WSMan:\localhost\Service\Auth\Basic       -Value $false
 
 # Scope the inbound rule to your operator subnet
 Set-NetFirewallRule -Name 'WINRM-HTTPS-In-5986' -RemoteAddress 10.20.0.0/24

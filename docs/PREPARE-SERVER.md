@@ -87,9 +87,9 @@ Set-Service WinRM -StartupType Automatic
 Start-Service WinRM
 winrm quickconfig -quiet -force 2>$null
 
-Set-Item -Path WSMan:\localhost\Service\Auth\Basic       -Value $true  -ErrorAction SilentlyContinue
-Set-Item -Path WSMan:\localhost\Service\AllowUnencrypted -Value $true  -ErrorAction SilentlyContinue
-Set-Item -Path WSMan:\localhost\Client\TrustedHosts      -Value '*' -Force -ErrorAction SilentlyContinue
+# NOTE: Basic auth, AllowUnencrypted, and TrustedHosts=* are intentionally NOT set — the
+# default NTLM transport encrypts the payload even over HTTP 5985, so they're unnecessary
+# and would only weaken the box.
 
 # Give non-builtin local admins a full token over the network.
 $p = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
@@ -108,10 +108,8 @@ Success is the literal line `WINRDP_WINRM_ENABLED` at the end. What each part do
   gotcha below.
 - **`Enable-PSRemoting` + service Automatic + `quickconfig`** — creates the HTTP listener
   on 5985 and starts WinRM at boot.
-- **`Basic` + `AllowUnencrypted`** — permissive first-contact auth. Not required when you
-  connect with NTLM (the default); see the NTLM note below.
-- **`TrustedHosts = *`** — this is a *client-side* setting; harmless on a target, present so
-  the box can also act as a controller. Scope it in production ([section 3](#3-provider-side-firewall--security-group)).
+- **No `Basic` / `AllowUnencrypted` / `TrustedHosts=*`** — the tool connects with NTLM (the
+  default), which encrypts the payload without them; see the NTLM note below.
 - **`LocalAccountTokenFilterPolicy = 1`** — the important one. It gives a **non-builtin**
   local admin a *full, high-integrity token over the network*, which is what lets elevated
   operations run directly over WinRM instead of getting "Access is denied" from a filtered
@@ -151,14 +149,15 @@ The enable script fixes this by setting active connections to `Private`
 (`Set-NetConnectionProfile -NetworkCategory Private`) *before* `quickconfig`. If you ever
 configure WinRM by hand, do the same, or use `Enable-PSRemoting -SkipNetworkProfileCheck`.
 
-### Note: `AllowUnencrypted` is not needed with NTLM
+### Note: NTLM needs no `AllowUnencrypted` / `Basic`
 
-The script enables `AllowUnencrypted` + `Basic` for the widest first-contact compatibility,
-but `winrdp-mcp` connects with **NTLM by default** (`add_host(..., winrm_auth="ntlm")`).
-NTLM **encrypts the message payload even over HTTP 5985**, so `AllowUnencrypted` only ever
-affects *Basic* auth, which you won't use in the normal path. You will sometimes see a
-harmless warning that "AllowUnencrypted will not work ... the network connection is Public"
-— it's only about Basic and does not block NTLM WinRM. If you want it gone, set the profile
+`winrdp-mcp` connects with **NTLM by default** (`add_host(..., winrm_auth="ntlm")`), which
+**encrypts the message payload even over HTTP 5985**. That's why the enable script does not
+turn on `AllowUnencrypted` or `Basic` — they'd only weaken the box without helping the normal
+path. (≤ 0.1.0 did set them; undo with `Set-Item WSMan:\localhost\Service\Auth\Basic $false`
+and `…\AllowUnencrypted $false`.) You may still see a harmless "AllowUnencrypted will not
+work ... the network connection is Public" warning from `quickconfig` — it's only about
+Basic and does not block NTLM WinRM. If you want it gone, set the profile
 to Private (the enable script already does). For real transport encryption use HTTPS 5986
 (see [section 5](#5-enabling-and-hardening-rdp-itself) and production hardening below).
 

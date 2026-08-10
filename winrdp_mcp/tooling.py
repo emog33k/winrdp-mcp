@@ -45,7 +45,8 @@ def stage_script(transport: Transport, content: str, name: str) -> dict:
 
 def stage_local_file(transport: Transport, local_path: str, name: Optional[str] = None) -> dict:
     """Upload a file from the operator machine into the box's tools cache."""
-    data = open(local_path, "rb").read()
+    with open(local_path, "rb") as f:
+        data = f.read()
     name = name or os.path.basename(local_path)
     transport.run_ps(ps.ensure_remote_dirs()).raise_for_status("ensure dirs")
     remote = _remote_path(name)

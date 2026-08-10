@@ -224,17 +224,22 @@ permissive and should be tightened for anything on an untrusted network.
 ## 6. The enable-WinRM provisioning script
 
 The zero-config provisioning ladder (`winrdp_mcp/provision.py`, `ENABLE_WINRM_PS`) runs an
-idempotent script on the target to make it manageable. For frictionless first contact it
-applies several settings that widen the box's remoting posture. Each, and how to tighten it:
+idempotent script on the target to make it manageable. It is deliberately minimal — it does
+**not** enable Basic auth, `AllowUnencrypted`, or `TrustedHosts=*` (0.1.1+): the default NTLM
+transport encrypts the message payload over HTTP without them, so enabling them would only
+widen the box's posture for no functional gain. What it does apply, and how to tighten it:
 
 | Setting the script applies | Why | How to tighten after provisioning |
 |---|---|---|
-| `Service\Auth\Basic = $true` | fallback auth for local accounts | disable Basic once NTLM/Kerberos is confirmed working: `Set-Item WSMan:\localhost\Service\Auth\Basic $false` |
-| `Service\AllowUnencrypted = $true` | let Basic work over HTTP | only affects Basic (NTLM still encrypts). Set `$false` once off Basic: `Set-Item WSMan:\localhost\Service\AllowUnencrypted $false` |
-| `Client\TrustedHosts = '*'` | let this box act as a WinRM **client** to any host | scope it: `Set-Item WSMan:\localhost\Client\TrustedHosts '10.0.0.0/24' -Force` (or specific hostnames). Not needed at all if you only manage *to* this box, never *from* it. |
 | `LocalAccountTokenFilterPolicy = 1` | give non-builtin local admins a **full token over the network** (fixes "Access is denied" and enables direct elevation, Section 4) | this weakens UAC remote-token filtering. Revert with the value `0` if you require filtered remote tokens and accept the scheduled-task elevation fallback instead. |
-| Firewall rule `WinRM-HTTP-In-5985` + `Windows Remote Management` group enabled | inbound WinRM | scope the rule's remote address to your management subnet, or move to 5986 and remove the 5985 rule |
-| Network profile flipped `Public` → `Private` | `Enable-PSRemoting`/quickconfig refuses on a `Public` profile | leave `Private` only on trusted networks; the WinRM `AllowUnencrypted will not work ... network connection is Public` message is harmless with NTLM (it only concerns Basic) |
+| Firewall rule `WinRM-HTTP-In-5985` + `Windows Remote Management` group enabled | inbound WinRM | scope the rule's remote address to your management subnet at the provider firewall, or move to 5986 and remove the 5985 rule |
+| Network profile flipped `Public` → `Private` | `Enable-PSRemoting`/quickconfig refuses on a `Public` profile | leave `Private` only on trusted networks |
+
+> Earlier versions (≤ 0.1.0) also set `Service\Auth\Basic`, `Service\AllowUnencrypted`, and
+> `Client\TrustedHosts='*'`. If you provisioned a box with one of those, undo them:
+> `Set-Item WSMan:\localhost\Service\Auth\Basic $false`,
+> `Set-Item WSMan:\localhost\Service\AllowUnencrypted $false`,
+> `Clear-Item WSMan:\localhost\Client\TrustedHosts -Force` (or scope it).
 
 The same script is the payload of the paste-once bootstrap one-liner
 (`bootstrap_oneliner`, base64 `-EncodedCommand`) and the SMB+WMI cold-start
@@ -317,9 +322,9 @@ Before pointing winrdp-mcp at anything beyond a disposable lab box:
       for any SSH-managed host.
 - [ ] **Never select `winrm_auth="basic"` over HTTP.** Keep NTLM (or use Kerberos/CredSSP in
       a domain).
-- [ ] **After provisioning, tighten the box:** scope `Client\TrustedHosts` (or clear it if
-      the box is only a management target), disable `Service\Auth\Basic` and
-      `Service\AllowUnencrypted`, and scope the WinRM firewall rule to your management subnet.
+- [ ] **After provisioning, tighten the box:** scope the WinRM firewall rule to your
+      management subnet (at the provider firewall). Basic/`AllowUnencrypted`/`TrustedHosts=*`
+      are no longer set by provisioning (0.1.1+); if you provisioned with ≤ 0.1.0, undo them.
 - [ ] **Decide on `LocalAccountTokenFilterPolicy`.** `1` (set by provisioning) enables direct
       remote elevation but weakens UAC remote-token filtering; revert to `0` if your policy
       requires filtered remote tokens.

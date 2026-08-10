@@ -245,7 +245,7 @@ Idempotent and safe to re-run. It:
 
 - Sets any **Public** network connection profile to **Private** first (a Public profile blocks `Enable-PSRemoting`/quickconfig).
 - `Enable-PSRemoting -Force -SkipNetworkProfileCheck`, sets WinRM service to Automatic, starts it, runs `winrm quickconfig`.
-- Enables `Service\Auth\Basic`, `Service\AllowUnencrypted`, and `Client\TrustedHosts = *` for first contact.
+- Does **not** enable `Service\Auth\Basic`, `Service\AllowUnencrypted`, or `Client\TrustedHosts = *` — the default NTLM transport encrypts the message payload over HTTP without them, so enabling them would only weaken the box (as of 0.1.1; earlier versions set them).
 - **Sets `LocalAccountTokenFilterPolicy = 1`** (DWord under `HKLM:\...\Policies\System`) so a **non-builtin local admin gets a full token over the network** — this is what makes elevated ops run directly over WinRM (§5) and fixes "Access is denied" for such accounts.
 - Opens the firewall (`Enable-NetFirewallRule -DisplayGroup 'Windows Remote Management'` + an explicit 5985 rule) and prints `WINRDP_WINRM_ENABLED`.
 

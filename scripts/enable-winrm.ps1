@@ -13,9 +13,10 @@ Set-Service WinRM -StartupType Automatic
 Start-Service WinRM
 winrm quickconfig -quiet -force 2>$null
 
-Set-Item -Path WSMan:\localhost\Service\Auth\Basic       -Value $true  -ErrorAction SilentlyContinue
-Set-Item -Path WSMan:\localhost\Service\AllowUnencrypted -Value $true  -ErrorAction SilentlyContinue
-Set-Item -Path WSMan:\localhost\Client\TrustedHosts      -Value '*' -Force -ErrorAction SilentlyContinue
+# NOTE: Basic auth, AllowUnencrypted, and TrustedHosts=* are intentionally NOT enabled.
+# The default NTLM transport encrypts the message payload even over HTTP 5985, so they are
+# unnecessary and would only weaken the box. Enable them yourself only if you specifically
+# need Basic-over-HTTP.
 
 # Give non-builtin local admins a full token over the network.
 $p = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'

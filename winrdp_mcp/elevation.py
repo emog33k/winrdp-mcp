@@ -111,13 +111,18 @@ def run_elevated(
                 rc = 0
         return ElevatedResult(out, err, rc)
     finally:
-        transport.run_ps(
-            f"Unregister-ScheduledTask -TaskName {ps.ps_string(task)} -Confirm:$false -ErrorAction SilentlyContinue;"
-            "Remove-Item -LiteralPath " + ",".join(
-                ps.ps_string(p) for p in (remote_ps, out_f, err_f, done_f)
-            ) + " -Force -ErrorAction SilentlyContinue",
-            timeout=30,
-        )
+        # Best-effort cleanup: if it raises (wedged transport) it must NOT replace the
+        # result / mask the real exception being propagated.
+        try:
+            transport.run_ps(
+                f"Unregister-ScheduledTask -TaskName {ps.ps_string(task)} -Confirm:$false -ErrorAction SilentlyContinue;"
+                "Remove-Item -LiteralPath " + ",".join(
+                    ps.ps_string(p) for p in (remote_ps, out_f, err_f, done_f)
+                ) + " -Force -ErrorAction SilentlyContinue",
+                timeout=30,
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def run_detached(transport: Transport, script: str, *, run_as: str = "SYSTEM") -> dict:
@@ -238,11 +243,14 @@ def run_in_user_session(transport: Transport, script: str, *, timeout: int = 120
         out = _safe_read(transport, out_f)
         return ExecResult(out, "" if not still_running else "still running (no exit captured)", rc)
     finally:
-        transport.run_ps(
-            f"Unregister-ScheduledTask -TaskName {ps.ps_string(task)} -Confirm:$false -ErrorAction SilentlyContinue;"
-            f"Remove-Item -LiteralPath {ps.ps_string(remote_ps)},{ps.ps_string(out_f)},{ps.ps_string(done_f)} -Force -ErrorAction SilentlyContinue",
-            timeout=30,
-        )
+        try:
+            transport.run_ps(
+                f"Unregister-ScheduledTask -TaskName {ps.ps_string(task)} -Confirm:$false -ErrorAction SilentlyContinue;"
+                f"Remove-Item -LiteralPath {ps.ps_string(remote_ps)},{ps.ps_string(out_f)},{ps.ps_string(done_f)} -Force -ErrorAction SilentlyContinue",
+                timeout=30,
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
 
 UAC_KEY = r"HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"

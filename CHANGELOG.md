@@ -3,6 +3,46 @@
 All notable changes to winrdp-mcp are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses semantic versioning.
 
+## [0.1.1] — 2026-08-10
+
+Security & reliability hardening from a full-code audit. No tool signatures removed;
+one behavioral change (provisioning no longer enables Basic/AllowUnencrypted — see below).
+
+### Fixed — reliability
+- **Chunked upload could recurse forever** over a WinRM-only box with no SMB/SSH fast channel
+  (`_CHUNK` == `_MAX_INLINE_PS`): a chunk write crossed the staging threshold and re-entered
+  the uploader. Chunk writes now use a non-staging inline path with headroom (`_CHUNK=1600`).
+- **pywinrm session was shared across threads** (fan-out to a duplicate alias, or a waiter
+  polling while another call runs) → HTTP 400 cascade. Each transport now serializes its own
+  use with a reentrant lock; cross-host parallelism is unaffected. `run_on_hosts` dedups aliases.
+- **Reconnect-retry no longer double-executes non-idempotent calls** (a lost response after a
+  command ran would re-run it). Retry is limited to idempotent reads.
+- **Per-call `timeout` is now honored on WinRM** (a wedged connection no longer blocks for the
+  full read-timeout regardless of the caller's budget).
+- Session/leak fixes: `close()` now tears down the SMB fast channel (not just SFTP); a failed
+  fast channel is closed before falling back; `port_forward` no longer leaks the SSH client on
+  a bind failure and honors the host's `ssh_port`; elevated-task cleanup can't mask the result.
+- `Vault` mutations/saves are now locked and use a unique temp file (no torn inventory under
+  fan-out).
+
+### Fixed — security
+- **PowerShell injection in `write_event` (`level`) that ran as SYSTEM** — now validated.
+  Also validated `file_hash` (`algorithm`) and `ui_find` (`control_type`).
+- **`deploy_ui_agent` bound the desktop-control agent to `0.0.0.0` with an optional auth key.**
+  Now binds `127.0.0.1` by default (reach it via `port_forward`); a non-loopback bind requires
+  a validated `auth_key`.
+- **New-user / service-account passwords no longer land on the target's process command line**
+  (Event 4688). They are staged to an admin-only file and read on the box (`exec_json(secrets=)`).
+- **Provisioning no longer enables Basic auth, `AllowUnencrypted`, or `TrustedHosts=*`** — the
+  default NTLM transport encrypts the payload without them, so they only weakened the box.
+- **Vault passphrase KDF is now scrypt + a persisted per-install salt** (was unsalted single-pass
+  SHA-256). Old inventories still decrypt and re-encrypt to the strong key on next save.
+- Owner-only ACLs: the vault key is hardened before its bytes are written (no open window);
+  the encrypted inventory gets an owner-only DACL; on-box secret files live in a SYSTEM+Admins
+  locked directory.
+- Log redaction now scrubs the **rendered** message (secrets passed as `%s` args were leaking);
+  `TransportError` text handed to the model is redacted.
+
 ## [0.1.0] — 2026-08-10
 
 Initial release. A zero-config MCP server that provisions and fully administers Windows

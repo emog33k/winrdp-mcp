@@ -23,6 +23,7 @@ import os
 import shlex
 import socket
 import subprocess
+import threading
 from dataclasses import dataclass
 from typing import Optional
 
@@ -54,7 +55,9 @@ class ExecResult:
 
     def raise_for_status(self, what: str = "command") -> "ExecResult":
         if not self.ok:
-            msg = (self.stderr or self.stdout or "").strip()
+            # Box output can echo a secret (a command line, a credential in an error). This
+            # message becomes `error: str(e)` handed to the model — scrub known secrets first.
+            msg = log.redact((self.stderr or self.stdout or "").strip())
             raise TransportError(f"{what} failed (rc={self.rc}): {msg[:2000]}")
         return self
 
@@ -74,7 +77,12 @@ def port_open(host: str, port: int, timeout: float = 3.0) -> bool:
 # Upload chunk size (base64 chars). Each chunk rides inside a run_ps whose script pywinrm
 # re-encodes to UTF-16LE base64 (~2.7x growth) onto a single command line; keep the chunk
 # small enough that the encoded command stays well under the WSMan/cmd command-line limit.
-_CHUNK = 2400
+# MUST stay well below _MAX_INLINE_PS: the chunk write is `Add-Content ... -Value '<chunk>'`
+# (~110 chars of scaffolding + path), and if that script crossed _MAX_INLINE_PS the WinRM
+# transport would try to STAGE it — which uploads via this very chunk loop → infinite
+# recursion. The chunk loop uses _run_ps_inline (never stages), and this headroom is the
+# second guard.
+_CHUNK = 1600
 
 # A run_ps script longer than this is staged to a temp .ps1 and run via `-File` instead of
 # being packed onto one command line. pywinrm runs `powershell -EncodedCommand <base64>`,
@@ -114,6 +122,15 @@ class Transport:
     def run_ps(self, script: str, timeout: int = 120) -> ExecResult:  # pragma: no cover
         raise NotImplementedError
 
+    def _run_ps_inline(self, script: str, timeout: int = 120, idempotent: bool = True) -> ExecResult:
+        """Run a short script WITHOUT the large-script staging path.
+
+        The base :meth:`upload` chunk loop calls this so a transport that stages large
+        scripts (WinRM) can never re-enter staging from inside an upload (which would
+        recurse forever). Transports that never stage just run it directly.
+        """
+        return self.run_ps(script, timeout=timeout)
+
     def run_cmd(self, command: str, timeout: int = 120) -> ExecResult:  # pragma: no cover
         raise NotImplementedError
 
@@ -137,12 +154,18 @@ class Transport:
         b64 = base64.b64encode(data).decode("ascii")
         tmp = remote_path + ".b64"
         # write the base64 text in chunks
-        self.run_ps(f"if(Test-Path {ps.ps_string(tmp)}){{Remove-Item -LiteralPath {ps.ps_string(tmp)} -Force}}").raise_for_status()
+        self._run_ps_inline(
+            f"if(Test-Path {ps.ps_string(tmp)}){{Remove-Item -LiteralPath {ps.ps_string(tmp)} -Force}}",
+            idempotent=False,
+        ).raise_for_status()
         for i in range(0, len(b64), _CHUNK):
             chunk = b64[i:i + _CHUNK]
-            self.run_ps(
+            # _run_ps_inline (not run_ps): a chunk write must never trip the staging
+            # threshold — that would upload via this same loop and recurse. idempotent=False:
+            # a blind reconnect-retry would append the chunk twice and corrupt the file.
+            self._run_ps_inline(
                 f"Add-Content -LiteralPath {ps.ps_string(tmp)} -Value {ps.ps_string(chunk)} -NoNewline",
-                timeout=timeout,
+                timeout=timeout, idempotent=False,
             ).raise_for_status("write chunk")
         self.run_ps(
             f"$b=[Convert]::FromBase64String((Get-Content -LiteralPath {ps.ps_string(tmp)} -Raw));"
@@ -194,6 +217,11 @@ class WinRMTransport(Transport):
         self._auth = auth
         self._cert_validation = cert_validation
         self._fchan = None  # lazy fast file channel: None=untried, False=none, else (kind,obj)
+        # pywinrm's Session (requests.Session + the open WSMan shell) is NOT thread-safe:
+        # two concurrent calls on one host would interleave and wedge the shell (HTTP 400
+        # cascade). Serialize all use of this session; different hosts hold different locks,
+        # so cross-host fan-out still runs in parallel. Reentrant: upload() calls run_ps().
+        self._oplock = threading.RLock()
         self._connect()
         if use_ssl and cert_validation == "ignore":
             _log.warning("winrm %s: HTTPS with cert validation DISABLED (MITM-exploitable); "
@@ -234,29 +262,70 @@ class WinRMTransport(Transport):
         msg = str(exc)
         return "Code 400" in msg or "Code 500" in msg or "RemoteDisconnected" in msg
 
-    def _run(self, fn):
-        """Run a pywinrm call, reconnecting + retrying once on a recoverable error."""
+    def _run(self, fn, *, idempotent: bool = True):
+        """Run a pywinrm call, reconnecting + retrying once on a recoverable error.
+
+        The retry is only safe for idempotent calls (reads/probes): a remote OperationTimeout
+        can close the socket AFTER the command already executed, so a blind retry of a
+        mutating call (create user, append a file chunk) would double-apply it. Mutating
+        callers pass idempotent=False — a recoverable error still reconnects the session for
+        the NEXT call, but the failing operation propagates instead of silently re-running.
+        """
         try:
             return fn()
         except Exception as e:  # noqa: BLE001
             if not self._is_recoverable(e):
+                raise
+            if not idempotent:
+                _log.warning("winrm %s: recoverable error (%s) on a non-idempotent call; "
+                             "reconnecting for next call, not retrying", self.host, type(e).__name__)
+                try:
+                    self._connect()
+                except Exception:  # noqa: BLE001
+                    pass
                 raise
             _log.warning("winrm %s: recoverable error (%s); reconnecting + retrying once",
                          self.host, type(e).__name__)
             self._connect()
             return fn()  # a second failure propagates
 
-    def run_ps(self, script: str, timeout: int = 120) -> ExecResult:
+    def _apply_timeout(self, timeout: int) -> None:
+        """Best-effort: bound this call by the caller's timeout instead of only the
+        construction-time default, so a wedged connection can't block for the full
+        read-timeout regardless of a short per-call budget (e.g. a waiter poll)."""
+        try:
+            op = max(20, min(int(timeout), WINRM_OP_TIMEOUT))
+            self._session.protocol.operation_timeout_sec = op
+            self._session.protocol.transport.read_timeout_sec = op + 30
+        except Exception:  # noqa: BLE001
+            pass
+
+    def run_ps(self, script: str, timeout: int = 120, idempotent: bool = True) -> ExecResult:
         # NOTE: no thread-based watchdog here. pywinrm's Session (requests.Session + the open
         # WSMan shell) is not thread-safe; abandoning a call mid-flight corrupts it and every
         # later request returns HTTP 400. Bounding comes from read_timeout_sec; a dropped or
-        # wedged connection is healed by _run reconnecting and retrying once.
+        # wedged connection is healed by _run reconnecting and retrying once. All session use
+        # is serialized by _oplock (reentrant, so the staging path below re-enters safely).
         if len(script) > _MAX_INLINE_PS:
             # pywinrm packs run_ps as `powershell -EncodedCommand <base64>` on ONE command
             # line; a big script overflows the length limit. Stage it and run via -File.
             return self._run_ps_via_file(script, timeout)
         _log.debug("winrm run_ps %s: %s", self.host, script[:120].replace("\n", " "))
-        r = self._run(lambda: self._session.run_ps(script))
+        with self._oplock:
+            self._apply_timeout(timeout)
+            r = self._run(lambda: self._session.run_ps(script), idempotent=idempotent)
+        return ExecResult(
+            stdout=r.std_out.decode("utf-8", "replace"),
+            stderr=r.std_err.decode("utf-8", "replace"),
+            rc=r.status_code,
+        )
+
+    def _run_ps_inline(self, script: str, timeout: int = 120, idempotent: bool = True) -> ExecResult:
+        # Same as run_ps but NEVER stages to a file: used by the base upload chunk loop so an
+        # upload can't re-enter staging (which uploads → recurses). Chunks are < _MAX_INLINE_PS.
+        with self._oplock:
+            self._apply_timeout(timeout)
+            r = self._run(lambda: self._session.run_ps(script), idempotent=idempotent)
         return ExecResult(
             stdout=r.std_out.decode("utf-8", "replace"),
             stderr=r.std_err.decode("utf-8", "replace"),
@@ -266,25 +335,36 @@ class WinRMTransport(Transport):
     def _run_ps_via_file(self, script: str, timeout: int) -> ExecResult:
         rid = binascii.hexlify(os.urandom(6)).decode()
         remote = f"{REMOTE_TMP}\\winrdp_ps_{rid}.ps1"
-        # UTF-8 BOM so `-File` decodes correctly on 5.1 and 7; upload chunks stay small.
-        self.upload(script.encode("utf-8-sig"), remote)
-        try:
-            r = self._run(lambda: self._session.run_cmd(
-                "powershell", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", remote]))
-            return ExecResult(
-                stdout=r.std_out.decode("utf-8", "replace"),
-                stderr=r.std_err.decode("utf-8", "replace"),
-                rc=r.status_code,
-            )
-        finally:
+        # Hold the session lock across upload + exec + cleanup so another thread can't
+        # interleave on this shell mid-stage. Reentrant: upload() re-acquires it.
+        with self._oplock:
+            # UTF-8 BOM so `-File` decodes correctly on 5.1 and 7; upload chunks stay small.
+            self.upload(script.encode("utf-8-sig"), remote)
             try:
-                self._run(lambda: self._session.run_ps(
-                    f"Remove-Item -LiteralPath {ps.ps_string(remote)} -Force -ErrorAction SilentlyContinue"))
-            except Exception:
-                pass
+                self._apply_timeout(timeout)
+                # Executing a staged script is not idempotent — don't blind-retry it.
+                r = self._run(lambda: self._session.run_cmd(
+                    "powershell", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", remote]),
+                    idempotent=False)
+                return ExecResult(
+                    stdout=r.std_out.decode("utf-8", "replace"),
+                    stderr=r.std_err.decode("utf-8", "replace"),
+                    rc=r.status_code,
+                )
+            finally:
+                try:
+                    self._run(lambda: self._session.run_ps(
+                        f"Remove-Item -LiteralPath {ps.ps_string(remote)} -Force -ErrorAction SilentlyContinue"),
+                        idempotent=False)
+                except Exception:
+                    pass
 
-    def run_cmd(self, command: str, timeout: int = 120) -> ExecResult:
-        r = self._run(lambda: self._session.run_cmd("cmd.exe", ["/c", command]))
+    def run_cmd(self, command: str, timeout: int = 120, idempotent: bool = False) -> ExecResult:
+        # A cmd.exe command line is assumed mutating (shutdown, netsh, schtasks, sc): don't
+        # blind-retry it on a mid-flight drop. Callers with a read-only command can opt in.
+        with self._oplock:
+            self._apply_timeout(timeout)
+            r = self._run(lambda: self._session.run_cmd("cmd.exe", ["/c", command]), idempotent=idempotent)
         return ExecResult(
             stdout=r.std_out.decode("utf-8", "replace"),
             stderr=r.std_err.decode("utf-8", "replace"),
@@ -324,35 +404,51 @@ class WinRMTransport(Transport):
         self._fchan = False
         return None
 
-    def upload(self, data: bytes, remote_path: str, timeout: int = 300) -> None:
-        ch = self._fast_channel()
-        if ch:
-            kind, obj = ch
+    def _drop_fast_channel(self) -> None:
+        """Close and forget the current fast file channel (so it isn't leaked when it fails
+        and we fall back to chunked base64)."""
+        ch = self._fchan
+        self._fchan = False
+        if isinstance(ch, tuple):
             try:
-                obj.write(data, remote_path) if kind == "smb" else obj.upload(data, remote_path, timeout)
-                return
-            except Exception as e:  # noqa: BLE001
-                _log.debug("winrm %s: fast upload failed (%s); chunked fallback", self.host, e)
-                self._fchan = False
-        super().upload(data, remote_path, timeout=timeout)
+                ch[1].close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def upload(self, data: bytes, remote_path: str, timeout: int = 300) -> None:
+        with self._oplock:
+            ch = self._fast_channel()
+            if ch:
+                kind, obj = ch
+                try:
+                    obj.write(data, remote_path) if kind == "smb" else obj.upload(data, remote_path, timeout)
+                    return
+                except Exception as e:  # noqa: BLE001
+                    _log.debug("winrm %s: fast upload failed (%s); chunked fallback", self.host, e)
+                    self._drop_fast_channel()
+            super().upload(data, remote_path, timeout=timeout)
 
     def download(self, remote_path: str, timeout: int = 300) -> bytes:
-        ch = self._fast_channel()
-        if ch:
-            kind, obj = ch
-            try:
-                return obj.read(remote_path) if kind == "smb" else obj.download(remote_path, timeout)
-            except Exception as e:  # noqa: BLE001
-                _log.debug("winrm %s: fast download failed (%s); base64 fallback", self.host, e)
-                self._fchan = False
-        return super().download(remote_path, timeout=timeout)
+        with self._oplock:
+            ch = self._fast_channel()
+            if ch:
+                kind, obj = ch
+                try:
+                    return obj.read(remote_path) if kind == "smb" else obj.download(remote_path, timeout)
+                except Exception as e:  # noqa: BLE001
+                    _log.debug("winrm %s: fast download failed (%s); base64 fallback", self.host, e)
+                    self._drop_fast_channel()
+            return super().download(remote_path, timeout=timeout)
 
     def close(self) -> None:
-        if isinstance(self._fchan, tuple) and self._fchan[0] == "sftp":
+        # Close whichever fast channel we opened — SFTP (paramiko client + socket + thread)
+        # OR SMB (a process-global smbclient session). Both were leaked before.
+        if isinstance(self._fchan, tuple):
             try:
                 self._fchan[1].close()
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
+            self._fchan = None
 
     def probe(self) -> bool:
         try:
@@ -382,6 +478,7 @@ class SSHTransport(Transport):
 
         self.host = host
         self.port = port
+        self._oplock = threading.RLock()  # serialize channel/SFTP use (paramiko isn't safe under races)
         self._client = paramiko.SSHClient()
         self._client.load_system_host_keys()
         # host_key_policy: "auto" = trust-on-first-use (pragmatic for fresh boxes),
@@ -426,10 +523,11 @@ class SSHTransport(Transport):
         return self.run_ps(f"& $env:ComSpec /c {ps.ps_string(command)}", timeout)
 
     def _exec(self, command: str, timeout: int) -> ExecResult:
-        stdin, stdout, stderr = self._client.exec_command(command, timeout=timeout)
-        out = stdout.read().decode("utf-8", "replace")
-        err = stderr.read().decode("utf-8", "replace")
-        rc = stdout.channel.recv_exit_status()
+        with self._oplock:
+            stdin, stdout, stderr = self._client.exec_command(command, timeout=timeout)
+            out = stdout.read().decode("utf-8", "replace")
+            err = stderr.read().decode("utf-8", "replace")
+            rc = stdout.channel.recv_exit_status()
         return ExecResult(out, err, rc)
 
     def upload(self, data: bytes, remote_path: str, timeout: int = 300) -> None:
@@ -438,20 +536,22 @@ class SSHTransport(Transport):
             f"$d=Split-Path {ps.ps_string(remote_path)} -Parent;"
             "if($d -and -not(Test-Path $d)){New-Item -ItemType Directory -Path $d -Force|Out-Null}"
         ).raise_for_status("mkdir for upload")
-        sftp = self._client.open_sftp()
-        try:
-            sftp.putfo(io.BytesIO(data), remote_path.replace("\\", "/"))
-        finally:
-            sftp.close()
+        with self._oplock:
+            sftp = self._client.open_sftp()
+            try:
+                sftp.putfo(io.BytesIO(data), remote_path.replace("\\", "/"))
+            finally:
+                sftp.close()
 
     def download(self, remote_path: str, timeout: int = 300) -> bytes:
-        sftp = self._client.open_sftp()
-        try:
-            buf = io.BytesIO()
-            sftp.getfo(remote_path.replace("\\", "/"), buf)
-            return buf.getvalue()
-        finally:
-            sftp.close()
+        with self._oplock:
+            sftp = self._client.open_sftp()
+            try:
+                buf = io.BytesIO()
+                sftp.getfo(remote_path.replace("\\", "/"), buf)
+                return buf.getvalue()
+            finally:
+                sftp.close()
 
     def probe(self) -> bool:
         try:
@@ -586,6 +686,14 @@ class SMBFiles:
             return True
         except Exception:
             return False
+
+    def close(self) -> None:
+        # register_session registers a PROCESS-GLOBAL connection; without this it lives until
+        # process exit (a leak when used as a WinRM fast channel or for cold-start staging).
+        try:
+            self._smbclient.delete_session(self.host)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def wmi_exec(host: str, username: str, password: str, command: str, domain: str = "") -> None:

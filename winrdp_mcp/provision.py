@@ -33,9 +33,13 @@ from .transports import (
 from .vault import Host
 
 # --- The canonical "make me manageable" PowerShell -------------------------
-# Enables WinRM over HTTP, opens the firewall, allows unencrypted+basic for local
-# accounts if needed, and flips LocalAccountTokenFilterPolicy so non-builtin local
-# admins get a full token over the network. Idempotent; safe to re-run.
+# Enables WinRM over HTTP, opens the firewall, and flips LocalAccountTokenFilterPolicy so
+# non-builtin local admins get a full token over the network. Idempotent; safe to re-run.
+#
+# Deliberately does NOT enable Basic auth, AllowUnencrypted, or TrustedHosts=* — the default
+# NTLM transport encrypts the SOAP payload over HTTP without them, so enabling them would
+# only weaken the box (allow a later client to send credentials near-cleartext). If you
+# specifically need Basic-over-HTTP, enable it yourself, scoped and knowingly.
 ENABLE_WINRM_PS = r"""
 $ErrorActionPreference='Stop'
 # Network profile can block WinRM quickconfig; make connections Private first.
@@ -44,15 +48,13 @@ try { Get-NetConnectionProfile | Where-Object {$_.NetworkCategory -eq 'Public'} 
 Enable-PSRemoting -Force -SkipNetworkProfileCheck
 Set-Service WinRM -StartupType Automatic
 Start-Service WinRM
-# Listener + auth
+# Listener (NTLM negotiate; message payload is encrypted even over HTTP)
 winrm quickconfig -quiet -force 2>$null
-Set-Item -Path WSMan:\localhost\Service\Auth\Basic        -Value $true -ErrorAction SilentlyContinue
-Set-Item -Path WSMan:\localhost\Service\AllowUnencrypted  -Value $true -ErrorAction SilentlyContinue
-Set-Item -Path WSMan:\localhost\Client\TrustedHosts       -Value '*' -Force -ErrorAction SilentlyContinue
 # Full token for local admins over the network (fixes "Access is denied" for non-builtin admins)
 $p='HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
 New-ItemProperty -Path $p -Name LocalAccountTokenFilterPolicy -Value 1 -PropertyType DWord -Force | Out-Null
-# Firewall
+# Firewall — opens WinRM-HTTP inbound. Scope this to your operator IP at the provider
+# firewall / security group; Windows can't know it here.
 Enable-NetFirewallRule -DisplayGroup 'Windows Remote Management' -ErrorAction SilentlyContinue
 netsh advfirewall firewall add rule name='WinRM-HTTP-In-5985' dir=in action=allow protocol=TCP localport=5985 2>$null
 Write-Output 'WINRDP_WINRM_ENABLED'

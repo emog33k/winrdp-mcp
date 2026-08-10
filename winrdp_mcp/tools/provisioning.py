@@ -6,6 +6,7 @@ from typing import Optional
 
 from .. import elevation, tooling
 from ..provision import ENABLE_SSH_PS, ENABLE_WINRM_PS
+from . import _validate as V
 
 
 def register(mcp, ctx) -> None:
@@ -81,14 +82,29 @@ def register(mcp, ctx) -> None:
     # ------------------------------------------------------------------ interactive UI agent
     @mcp.tool
     def deploy_ui_agent(host: Optional[str] = None, port: int = 8765,
-                        auth_key: Optional[str] = None) -> dict:
+                        auth_key: Optional[str] = None, bind: str = "127.0.0.1") -> dict:
         """Deploy the interactive-desktop UI agent (winremote-mcp) onto a box for
         click/type/OCR-level control, and start it as an HTTP MCP endpoint.
 
-        Requires Python + pip on the box (installs winremote-mcp via pip). For headless
-        boxes without Python, prefer the PowerShell-based tools which need no agent.
-        Returns the endpoint URL to add as a second MCP server in Claude.
+        By default the agent binds to 127.0.0.1 (loopback) — reach it from your machine with
+        port_forward(remote_port=port). To bind it to a public interface (bind='0.0.0.0') you
+        MUST pass an auth_key, otherwise it would be an unauthenticated remote desktop-control
+        endpoint. Requires Python + pip on the box.
         """
+        # auth_key is spliced into the launch command; a token has no quotes/shell meta.
+        if auth_key:
+            V.token(auth_key, "auth_key")
+        loopback = bind in ("127.0.0.1", "localhost", "::1")
+        if not loopback:
+            V.host(bind, "bind")
+            if not auth_key:
+                return {
+                    "ok": False,
+                    "error": (f"refusing to bind the UI agent to {bind} without an auth_key — that "
+                              "would expose an UNAUTHENTICATED remote desktop-control endpoint on "
+                              "the box. Pass auth_key=..., or keep bind='127.0.0.1' and reach it via "
+                              "port_forward(remote_port=%d)." % int(port)),
+                }
         t = ctx.transport_for(host)
         # Verify python
         chk = t.run_ps("(Get-Command python -ErrorAction SilentlyContinue).Source", timeout=30)
@@ -98,19 +114,28 @@ def register(mcp, ctx) -> None:
                 "error": "python not found on box; install Python first or use PowerShell tools",
             }
         install = t.run_ps("python -m pip install --upgrade winremote-mcp", timeout=600)
-        key = auth_key or ""
-        keyarg = f" --auth-key {key}" if key else ""
+        keyarg = f" --auth-key {auth_key}" if auth_key else ""
         # launch in the interactive session so it can see the desktop
         launch = (
             f"Start-Process -WindowStyle Hidden powershell -ArgumentList "
-            f"'-NoProfile','-Command','winremote-mcp serve --http --host 0.0.0.0 --port {int(port)}{keyarg}'"
+            f"'-NoProfile','-Command','winremote-mcp serve --http --host {bind} --port {int(port)}{keyarg}'"
         )
         r = elevation.run_in_user_session(t, launch, timeout=60)
         h = ctx.resolve(host)
+        if loopback:
+            endpoint = f"http://127.0.0.1:{int(port)}/mcp"
+            note = ("Agent bound to loopback on the box. Reach it with "
+                    f"port_forward(remote_port={int(port)}), then add the local URL as an HTTP MCP "
+                    "server in Claude.")
+        else:
+            endpoint = f"http://{h.host}:{int(port)}/mcp"
+            note = "Add this URL as an HTTP MCP server in Claude (auth_key required to connect)."
         return {
             "ok": True,
             "install_log_tail": install.stdout[-500:],
-            "endpoint": f"http://{h.host}:{int(port)}/mcp",
-            "note": "Add this URL as an HTTP MCP server in Claude for desktop UI control.",
+            "endpoint": endpoint,
+            "bind": bind,
+            "authenticated": bool(auth_key),
+            "note": note,
             "launch_stderr": r.stderr,
         }

@@ -10,6 +10,7 @@ from typing import Optional
 
 from .. import ps
 from ..config import REMOTE_TMP
+from . import _validate as V
 
 
 def register(mcp, ctx) -> None:
@@ -136,6 +137,7 @@ def register(mcp, ctx) -> None:
     @mcp.tool
     def file_hash(path: str, host: Optional[str] = None, algorithm: str = "SHA256") -> dict:
         """Compute a file hash on a box. algorithm: SHA256|SHA1|MD5|SHA384|SHA512."""
+        V.enum(algorithm, {"SHA256", "SHA1", "MD5", "SHA384", "SHA512"}, "algorithm")
         body = (
             f"$h=Get-FileHash -LiteralPath {ps.ps_string(path)} -Algorithm {algorithm};"
             "$result=@{path=$h.Path;algorithm=$h.Algorithm;hash=$h.Hash}"
@@ -251,7 +253,8 @@ def register(mcp, ctx) -> None:
         tmp_base = os.path.join(tempfile.gettempdir(), "winrdp_sync_" + binascii.hexlify(os.urandom(4)).decode())
         zip_path = shutil.make_archive(tmp_base, "zip", local_path)
         try:
-            data = open(zip_path, "rb").read()
+            with open(zip_path, "rb") as f:
+                data = f.read()
             rid = binascii.hexlify(os.urandom(4)).decode()
             remote_zip = f"{REMOTE_TMP}\\sync_{rid}.zip"
             t = ctx.transport_for(host)

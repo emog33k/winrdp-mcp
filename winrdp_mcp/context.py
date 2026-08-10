@@ -12,11 +12,15 @@ the three primitives tools actually use:
 
 from __future__ import annotations
 
+import base64
+import binascii
+import os
 import threading
 import time
 from typing import Any, Optional
 
 from . import elevation, log, ps
+from .config import REMOTE_SECURE
 from .provision import open_transport, provision
 from .transports import ExecResult, Transport
 from .vault import Host, Vault
@@ -123,6 +127,52 @@ class Context:
         finally:
             _log.debug("exec %s [%s via %s] %.1fs", h.alias, mode, t.name, time.time() - start)
 
+    def _stage_secrets(self, t: Transport, secrets: dict) -> tuple[str, list[str]]:
+        """Upload each secret to an admin-only temp file on the box and return a PS prelude
+        that reads it back into a variable, plus the file paths to delete afterward.
+
+        This keeps a plaintext secret (a new account password) OUT of the script body — and
+        therefore off the target's process command line / Event 4688, where an inline
+        ``ConvertTo-SecureString '<pw>'`` would otherwise persist. The file lives in
+        REMOTE_TMP (locked to SYSTEM+Administrators by ensure_remote_dirs) and is deleted in
+        a finally. Residual: over pure WinRM with no SMB/SFTP fast channel, the upload itself
+        transits a command line transiently; a fast channel avoids even that.
+        """
+        # Ensure the secure dir exists and is locked to SYSTEM + Administrators only (SIDs are
+        # locale-independent). ProgramData is world-readable by default; this dir is not.
+        try:
+            t.run_ps(
+                f"$s={ps.ps_string(REMOTE_SECURE)};"
+                "if(-not(Test-Path $s)){New-Item -ItemType Directory -Path $s -Force|Out-Null};"
+                "& icacls $s /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' 2>$null|Out-Null",
+                timeout=30,
+            )
+        except Exception:  # noqa: BLE001 — worst case the dir keeps default (still deleted after)
+            pass
+        prelude: list[str] = []
+        paths: list[str] = []
+        for name, value in secrets.items():
+            log.register_secret(str(value))
+            rid = binascii.hexlify(os.urandom(6)).decode()
+            p = f"{REMOTE_SECURE}\\winrdp_sec_{rid}.b64"
+            b64 = base64.b64encode(str(value).encode("utf-8")).decode("ascii")
+            t.upload(b64.encode("ascii"), p)
+            paths.append(p)
+            prelude.append(
+                f"${name}=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("
+                f"(Get-Content -LiteralPath {ps.ps_string(p)} -Raw)));"
+            )
+        return "".join(prelude), paths
+
+    def _cleanup_paths(self, t: Transport, paths: list[str]) -> None:
+        if not paths:
+            return
+        lits = ",".join(ps.ps_string(p) for p in paths)
+        try:
+            t.run_ps(f"Remove-Item -LiteralPath {lits} -Force -ErrorAction SilentlyContinue", timeout=30)
+        except Exception:  # noqa: BLE001
+            pass
+
     def exec_json(
         self,
         body: str,
@@ -131,8 +181,26 @@ class Context:
         elevated: bool = False,
         depth: int = 6,
         timeout: int = 120,
+        secrets: Optional[dict] = None,
     ) -> Any:
-        """Run a JSON-emitting body (assigns ``$result``) and return parsed data."""
+        """Run a JSON-emitting body (assigns ``$result``) and return parsed data.
+
+        ``secrets`` (name -> plaintext) are staged to admin-only temp files on the box and
+        exposed to the body as ``$name`` variables, so a password never appears inline in the
+        script / command line. They are deleted after the run.
+        """
+        if secrets:
+            t = self.transport_for(host)
+            prelude, paths = self._stage_secrets(t, secrets)
+            try:
+                return self._exec_json(prelude + body, host=host, elevated=elevated,
+                                       depth=depth, timeout=timeout)
+            finally:
+                self._cleanup_paths(t, paths)
+        return self._exec_json(body, host=host, elevated=elevated, depth=depth, timeout=timeout)
+
+    def _exec_json(self, body: str, *, host: Optional[str], elevated: bool, depth: int,
+                   timeout: int) -> Any:
         script = ps.wrap_json(body, depth=depth)
         if elevated and not self.transport_for(host).is_elevated():
             t = self.transport_for(host)

@@ -53,29 +53,38 @@ class _Handler(socketserver.BaseRequestHandler):
 
 
 class _Tunnel:
-    def __init__(self, alias, host, username, password, remote_host, remote_port, local_port):
+    def __init__(self, alias, host, username, password, remote_host, remote_port, local_port,
+                 ssh_port=22):
         import paramiko
 
         self.alias = alias
         self.remote = f"{remote_host}:{remote_port}"
         self._client = paramiko.SSHClient()
         self._client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        self._client.connect(hostname=host, port=22, username=username,
+        self._client.connect(hostname=host, port=ssh_port, username=username,
                              password=password or None, look_for_keys=False,
                              allow_agent=False, timeout=15)
-        transport = self._client.get_transport()
+        try:
+            transport = self._client.get_transport()
 
-        class _H(_Handler):
-            ssh_transport = transport
-            chain_host = remote_host
-            chain_port = remote_port
+            class _H(_Handler):
+                ssh_transport = transport
+                chain_host = remote_host
+                chain_port = remote_port
 
-        self._server = socketserver.ThreadingTCPServer(("127.0.0.1", local_port), _H)
-        self._server.daemon_threads = True
-        self._server.allow_reuse_address = True
-        self.local_port = self._server.server_address[1]
-        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
-        self._thread.start()
+            self._server = socketserver.ThreadingTCPServer(("127.0.0.1", local_port), _H)
+            self._server.daemon_threads = True
+            self._server.allow_reuse_address = True
+            self.local_port = self._server.server_address[1]
+            self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+            self._thread.start()
+        except Exception:
+            # e.g. local_port already bound — don't leak the SSH connection/socket/thread.
+            try:
+                self._client.close()
+            except Exception:
+                pass
+            raise
 
     def stop(self):
         try:
@@ -100,7 +109,7 @@ def register(mcp, ctx) -> None:
         h = ctx.resolve(host)
         try:
             t = _Tunnel(h.alias, h.host, h.username, h.password, remote_host, int(remote_port),
-                        int(local_port))
+                        int(local_port), ssh_port=getattr(h, "ssh_port", 22))
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "error": f"tunnel failed: {e} — is OpenSSH running on the box? "
                                           "run enable_ssh or provision_host."}

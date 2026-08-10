@@ -179,7 +179,9 @@ def register(mcp, ctx) -> None:
         """
         conds = []
         if control_type:
-            conds.append(f"$_.Current.ControlType.ProgrammaticName -like '*.{control_type}'")
+            # ps_string, not raw interpolation — a `'` in control_type would otherwise close
+            # the pattern literal and inject into this (as_user) script.
+            conds.append(f"$_.Current.ControlType.ProgrammaticName -like {ps.ps_string('*.' + control_type)}")
         if name:
             conds.append(f"$_.Current.Name -like {ps.ps_string('*' + name + '*')}")
         where = ("|Where-Object{" + " -and ".join(conds) + "}") if conds else ""

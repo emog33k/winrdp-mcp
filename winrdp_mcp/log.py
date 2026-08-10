@@ -47,8 +47,16 @@ def redact(text: str) -> str:
 
 class _RedactFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:  # noqa: A003
-        if isinstance(record.msg, str):
-            record.msg = redact(record.msg)
+        # Redact the RENDERED message, not just the format template: secrets arrive as lazy
+        # `%s` args (record.args), so scrubbing record.msg alone left them in the output.
+        try:
+            rendered = record.getMessage()
+        except Exception:  # noqa: BLE001 — never let logging raise
+            return True
+        scrubbed = redact(rendered)
+        if scrubbed != rendered:
+            record.msg = scrubbed
+            record.args = ()
         return True
 
 

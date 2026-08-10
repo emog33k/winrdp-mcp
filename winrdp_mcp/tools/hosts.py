@@ -171,7 +171,14 @@ def register(mcp, ctx) -> None:
 def _select(ctx, aliases: str, tag: str) -> list:
     names = [a.strip() for a in aliases.split(",") if a.strip()]
     if names:
-        return [a for a in names if ctx.vault.get(a)]
+        # Dedup (preserving order): a duplicate alias would fan out two concurrent calls onto
+        # the SAME cached transport — needless work, and it leans on the per-host lock.
+        out, seen = [], set()
+        for a in names:
+            if a not in seen and ctx.vault.get(a):
+                seen.add(a)
+                out.append(a)
+        return out
     if tag:
         return [h.alias for h in ctx.vault.all() if tag in (h.tags or [])]
     return [h.alias for h in ctx.vault.all()]

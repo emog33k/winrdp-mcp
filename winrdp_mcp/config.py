@@ -44,6 +44,10 @@ def scripts_dir() -> Path:
 REMOTE_ROOT = r"C:\ProgramData\winrdp-mcp"
 REMOTE_TOOLS = REMOTE_ROOT + r"\tools"
 REMOTE_TMP = REMOTE_ROOT + r"\tmp"
+# Locked to SYSTEM + Administrators only (see context._stage_secrets). Used for transient
+# secret files so a non-admin local user can't read them. REMOTE_TMP is intentionally left
+# user-writable because run_in_user_session writes its output there as the interactive user.
+REMOTE_SECURE = REMOTE_ROOT + r"\secure"
 
 # Default WinRM ports.
 WINRM_HTTP_PORT = 5985
