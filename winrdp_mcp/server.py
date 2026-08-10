@@ -37,6 +37,7 @@ Power features:
   * stage_tool("psexec" | URL | local-file)   pull helpers onto a box on demand
   * rdp_enable / rdp_sessions / rdp_open       first-class RDP control + connect
   * screenshot()                    capture the live RDP desktop
+  * send_keys / mouse_click / ui_invoke / gui_script   drive the interactive desktop GUI
 """
 
 # Read-only tools: never mutate box state. Safe to auto-run.
@@ -47,7 +48,7 @@ READONLY = {
     "reg_read", "uac_get", "list_staged_tools", "rdp_status", "rdp_sessions",
     "net_info", "ping", "port_check", "net_connections", "port_proxy_list",
     "cim_query", "hotfixes", "defender_status", "env_get", "list_startup",
-    "list_installed_software", "rdp_connection_file",
+    "list_installed_software", "rdp_connection_file", "list_windows", "ui_find",
 }
 
 # Destructive tools: delete data, kill processes, cut access, or reboot. Clients should

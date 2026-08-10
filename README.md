@@ -7,7 +7,7 @@
 [![Platform: Windows](https://img.shields.io/badge/Target-Windows%2010%2F11%20%7C%20Server%202016--2025-0078D6.svg)](#)
 [![MCP: FastMCP](https://img.shields.io/badge/MCP-FastMCP-6E56CF.svg)](https://github.com/jlowin/fastmcp)
 
-You give it a host and admin credentials. It makes the box remotely manageable *by itself* — turning on WinRM, opening the Windows firewall, and fixing local-admin token filtering — regardless of the box's starting state or Windows version. Claude then gets **108 tools**: shell, files, registry, services, processes, scheduled tasks, users, firewall, event logs, software, networking, live RDP control, screenshots, real UAC elevation, and on-demand tool staging.
+You give it a host and admin credentials. It makes the box remotely manageable *by itself* — turning on WinRM, opening the Windows firewall, and fixing local-admin token filtering — regardless of the box's starting state or Windows version. Claude then gets **118 tools**: shell, files, registry, services, processes, scheduled tasks, users, firewall, event logs, software, networking, live RDP control, screenshots, real UAC elevation, and on-demand tool staging.
 
 **Nothing is pre-installed on the target.** The controller reaches boxes over WinRM / SSH / SMB from wherever Claude Code runs, and manages one box or a whole fleet from a single server.
 
@@ -15,8 +15,9 @@ You give it a host and admin credentials. It makes the box remotely manageable *
 
 - **Zero-config provisioning.** `provision_host` climbs a ladder — WinRM → SSH → SMB/WMI cold-start → paste-once bootstrap — and makes a fresh, locked-down box manageable with no manual WinRM setup.
 - **Real UAC / elevation, not "please run as admin."** Over WinRM a local admin gets a high-integrity full token and elevated ops run directly; a filtered token falls back to a one-shot `SYSTEM` Scheduled Task. `as_user=True` runs inside the interactive RDP desktop.
-- **108 tools across 10 modules**, every one with `readOnlyHint` / `destructiveHint` safety annotations so MCP clients can gate destructive actions automatically.
+- **118 tools across 11 modules**, every one with `readOnlyHint` / `destructiveHint` safety annotations so MCP clients can gate destructive actions automatically.
 - **On-demand code execution.** `run_python` finds or installs Python, pip-installs deps, runs your code, and cleans up — same for Node, PowerShell, cmd, and batch. `stage_tool` pulls Sysinternals (or any URL/local file) onto the box mid-task.
+- **Native GUI automation.** Drive the interactive RDP desktop — keystrokes, mouse, and UI Automation (find/click/read controls by name) — plus live screenshots, with no on-box agent.
 - **First-class RDP** and an **encrypted multi-host inventory** (Fernet) with tags and parallel fan-out across the fleet.
 
 ### Two modes, one package
@@ -97,7 +98,7 @@ If the box has only RDP open, `provision_host` returns a `bootstrap_oneliner` to
 
 ## Tool groups
 
-**108 tools** across ten modules. The full catalog — every signature, parameter, default, and safety class — is in **[docs/TOOLS.md](docs/TOOLS.md)**.
+**118 tools** across eleven modules. The full catalog — every signature, parameter, default, and safety class — is in **[docs/TOOLS.md](docs/TOOLS.md)**.
 
 | Group | Module | # | What it covers |
 |-------|--------|--:|----------------|
@@ -111,8 +112,9 @@ If the box has only RDP open, `provision_host` returns a `bootstrap_oneliner` to
 | **Software** | `software.py` | 4 | `install_software` (winget/choco/MSI/EXE-url), `uninstall_software`, `list_installed_software`, `ensure_package_manager` |
 | **Network** | `network.py` | 8 | `net_info`, `ping`, `port_check`, `net_connections`, `port_proxy_add`/`list`/`delete` (tunneling), `set_dns` |
 | **Windows** | `windows.py` | 11 | `cim_query` (any WQL), `windows_features`, `windows_update`, `hotfixes`, Defender (`status`/`realtime`/`exclusion_add`/`scan`), `env_get`/`env_set`, `list_startup` |
+| **GUI** | `gui.py` | 10 | `list_windows`, `focus_window`, `send_keys`, `type_text`, `mouse_move`, `mouse_click`, `ui_find`, `ui_invoke`, `ui_set_text`, `gui_script` — drive the interactive desktop |
 
-Safety classification across all 108: **34 read-only**, **22 destructive**, **52 mutating**. Read-only tools are safe to auto-run; destructive tools carry `destructiveHint=True` so clients gate them behind confirmation.
+Safety classification across all 118: **36 read-only**, **22 destructive**, **60 mutating**. Read-only tools are safe to auto-run; destructive tools carry `destructiveHint=True` so clients gate them behind confirmation.
 
 ---
 
@@ -239,7 +241,7 @@ Full threat model, credential-vault internals, log redaction, argument-injection
 | **[docs/SECURITY.md](docs/SECURITY.md)** | Threat model, trust boundary, credential handling, transport/MITM, the enable-WinRM script, argument-injection defense, hardening checklist. |
 | **[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** | Symptom → cause → fix for the failure modes you actually hit (provision failures, connection drops, slow elevation, Python/Node install, SSH banner, 5986 certs, MCP registration). |
 | **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** | Internal map for contributors: transports → PowerShell marshaling → provisioning → elevation → context → vault → tooling → server assembly. |
-| **[docs/TOOLS.md](docs/TOOLS.md)** | The complete reference for all 108 tools — signatures, parameters, defaults, and safety class. |
+| **[docs/TOOLS.md](docs/TOOLS.md)** | The complete reference for all 118 tools — signatures, parameters, defaults, and safety class. |
 
 ---
 

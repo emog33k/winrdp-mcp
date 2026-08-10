@@ -18,6 +18,7 @@ The complete catalog of every tool exposed by the `winrdp-mcp` FastMCP server. E
 - [Software](#software) — `winrdp_mcp/tools/software.py`
 - [Network](#network) — `winrdp_mcp/tools/network.py`
 - [Windows](#windows) — `winrdp_mcp/tools/windows.py`
+- [GUI](#gui-guipy--10-tools) — `winrdp_mcp/tools/gui.py`
 
 ## Safety classification
 
@@ -45,7 +46,8 @@ Tool visibility can be narrowed at startup: `WINRDP_ENABLED_TOOLS` (CSV allow-li
 | Software | `software.py` | 4 | 1 | 1 | 2 |
 | Network | `network.py` | 8 | 5 | 1 | 2 |
 | Windows | `windows.py` | 11 | 5 | 1 | 5 |
-| **Total** | | **108** | **34** | **22** | **52** |
+| GUI | `gui.py` | 10 | 2 | 0 | 8 |
+| **Total** | | **118** | **36** | **22** | **60** |
 
 ---
 
@@ -788,4 +790,78 @@ env_set(name: str, value: str, host: Optional[str] = None, scope: str = "Machine
 List autostart entries (Run keys, Startup folders, WMI startup commands).
 ```python
 list_startup(host: Optional[str] = None)
+```
+
+---
+
+## GUI (`gui.py`) — 10 tools
+
+Native GUI automation of the interactive RDP desktop (keyboard, mouse, UI Automation) with
+no on-box agent. Every tool runs inside the logged-on user's session via `as_user`, so it
+requires an **active/connected** interactive session (a disconnected RDP session has no
+composed desktop) and carries the usual scheduled-task latency. For multi-step sequences,
+prefer a single `gui_script` (or `run_powershell(as_user=True)`) call.
+
+#### `list_windows` — read-only
+List the top-level windows on the interactive desktop (title, process, pid, handle).
+```python
+list_windows(host: Optional[str] = None)
+```
+
+#### `focus_window`
+Bring a window to the foreground by (partial) title so keystrokes land in it.
+```python
+focus_window(title: str, host: Optional[str] = None)
+```
+
+#### `send_keys`
+Send keystrokes to the active window using SendKeys syntax (e.g. `^s`, `%{F4}`, `{ENTER}`).
+```python
+send_keys(keys: str, host: Optional[str] = None, window: Optional[str] = None)
+```
+
+#### `type_text`
+Type literal text (SendKeys metacharacters auto-escaped); optional `window` focuses first.
+```python
+type_text(text: str, host: Optional[str] = None, window: Optional[str] = None)
+```
+
+#### `mouse_move`
+Move the cursor to screen coordinates.
+```python
+mouse_move(x: int, y: int, host: Optional[str] = None)
+```
+
+#### `mouse_click`
+Click at screen coordinates. `button`: left | right | middle; `double` for double-click.
+```python
+mouse_click(x: int, y: int, host: Optional[str] = None, button: str = "left", double: bool = False)
+```
+
+#### `ui_find` — read-only
+Find UI elements via UI Automation, filtered by (partial) `name` and/or `control_type`
+(Button, Edit, MenuItem, …). Returns name, type, automation id, and rect (with center x/y).
+```python
+ui_find(name: Optional[str] = None, control_type: Optional[str] = None, host: Optional[str] = None, top: int = 60)
+```
+
+#### `ui_invoke`
+Find a control by (partial) name and activate it (Invoke → Toggle → click center) — press a
+button without pixel math.
+```python
+ui_invoke(name: str, host: Optional[str] = None)
+```
+
+#### `ui_set_text`
+Set the text of an input control found by (partial) name (UIA ValuePattern).
+```python
+ui_set_text(name: str, text: str, host: Optional[str] = None)
+```
+
+#### `gui_script`
+Run a PowerShell block in the interactive session with GUI helpers pre-loaded
+(System.Windows.Forms/SendKeys, the `[WinRDPMouse]` class, UIAutomationClient/Types) — the
+one-call way to do a multi-step GUI sequence without per-action latency.
+```python
+gui_script(script: str, host: Optional[str] = None, timeout: int = 180)
 ```
