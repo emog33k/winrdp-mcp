@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import binascii
+import os
 from typing import Optional
 
 from .. import log, ps
+from ..config import REMOTE_TMP
 from . import _validate as V
 
 
@@ -126,13 +129,29 @@ def register(mcp, ctx) -> None:
     def start_process(command: str, host: Optional[str] = None, elevated: bool = False,
                       as_user: bool = False, wait: bool = False) -> dict:
         """Launch a program/command on a box. elevated=True for full token, as_user=True
-        to launch in the interactive RDP desktop session."""
+        to launch in the interactive RDP desktop session.
+
+        When wait=False the launched process's stdout/stderr are redirected to log files
+        (returned as stdout_log/stderr_log) so a background process that fails can be
+        diagnosed — inspect them with tail_file. wait=True returns the output directly.
+        """
         if wait:
             r = ctx.exec_ps(command, host=host, elevated=elevated, as_user=as_user, timeout=300)
-        else:
-            launch = f"Start-Process -FilePath 'cmd.exe' -ArgumentList '/c',{ps.ps_string(command)} -WindowStyle Hidden"
-            r = ctx.exec_ps(launch, host=host, elevated=elevated, as_user=as_user, timeout=60)
-        return {"stdout": r.stdout, "stderr": r.stderr, "rc": r.rc}
+            return {"stdout": r.stdout, "stderr": r.stderr, "rc": r.rc}
+        rid = binascii.hexlify(os.urandom(5)).decode()
+        out = f"{REMOTE_TMP}\\proc_{rid}.out"
+        err = f"{REMOTE_TMP}\\proc_{rid}.err"
+        launch = (
+            ps.ensure_remote_dirs() + ";"
+            f"$p=Start-Process -FilePath $env:ComSpec -ArgumentList '/c',{ps.ps_string(command)} "
+            f"-WindowStyle Hidden -PassThru -RedirectStandardOutput {ps.ps_string(out)} "
+            f"-RedirectStandardError {ps.ps_string(err)};Write-Output $p.Id"
+        )
+        r = ctx.exec_ps(launch, host=host, elevated=elevated, as_user=as_user, timeout=60)
+        pid = (r.stdout or "").strip().splitlines()[-1].strip() if r.stdout.strip() else None
+        return {"pid": pid, "stdout_log": out, "stderr_log": err,
+                "note": "background process launched; read stdout_log/stderr_log with tail_file",
+                "stderr": r.stderr, "rc": r.rc}
 
     # ------------------------------------------------------------------ scheduled tasks
     @mcp.tool

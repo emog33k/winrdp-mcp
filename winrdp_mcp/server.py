@@ -50,7 +50,7 @@ READONLY = {
     "cim_query", "hotfixes", "defender_status", "env_get", "list_startup",
     "list_installed_software", "rdp_connection_file", "list_windows", "ui_find",
     "wait_for_port", "wait_for_service", "wait_for_process", "wait_for_file",
-    "wait_for_window", "tail_file", "ocr_screen", "record_screen",
+    "wait_for_window", "tail_file", "ocr_screen", "record_screen", "port_forward_list",
 }
 
 # Destructive tools: delete data, kill processes, cut access, or reboot. Clients should

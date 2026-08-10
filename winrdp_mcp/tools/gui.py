@@ -316,7 +316,7 @@ def register(mcp, ctx) -> None:
         body = _MOUSE_TYPE + _CAPTURE + _OCR + (
             f"$m=@(@($words)|Where-Object{{$_.text -like {ps.ps_string('*' + text + '*')}}});"
             f"if($m.Count -lt {int(occurrence)}){{$result=@{{ok=$false;error='text not found';"
-            "matches=$m.Count;seen=@(@($words)|ForEach-Object{$_.text}|Select-Object -First 40)}}}else{"
+            "matches=$m.Count;seen=@(@($words)|ForEach-Object{$_.text}|Select-Object -First 40)}}else{"
             f"$t=$m[{int(occurrence) - 1}];[WinRDPMouse]::SetCursorPos($t.x,$t.y)|Out-Null;Start-Sleep -Milliseconds 60;"
             + clicks +
             "$result=@{ok=$true;text=$t.text;x=$t.x;y=$t.y}}"

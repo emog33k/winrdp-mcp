@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from . import (admin, files, gui, hosts, network, provisioning, rdp, scheduling, scripting,
-               software, system, waiters, windows)
+               software, system, tunnel, waiters, windows)
 
 MODULES = [hosts, provisioning, system, scripting, files, admin, rdp, software, network,
-           windows, gui, waiters, scheduling]
+           windows, gui, waiters, scheduling, tunnel]
 
 
 def register_all(mcp, ctx) -> None:

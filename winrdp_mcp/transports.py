@@ -71,8 +71,11 @@ def port_open(host: str, port: int, timeout: float = 3.0) -> bool:
 _CHUNK = 2400
 
 # A run_ps script longer than this is staged to a temp .ps1 and run via `-File` instead of
-# being packed onto one command line (which would overflow the WSMan/cmd length limit).
-_MAX_INLINE_PS = 6000
+# being packed onto one command line. pywinrm runs `powershell -EncodedCommand <base64>`,
+# and the script re-encodes to UTF-16LE base64 (~2.7x). Keep the encoded command well under
+# the conservative 8191 cmd-line limit some boxes enforce: 2400 text -> ~6.4k encoded.
+# Staging uses the fast file channel (SMB/SFTP), so it stays cheap.
+_MAX_INLINE_PS = 2400
 
 
 class Transport:

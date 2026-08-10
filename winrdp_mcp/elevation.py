@@ -140,16 +140,29 @@ def run_in_user_session(transport: Transport, script: str, *, timeout: int = 120
     out_f = f"{REMOTE_TMP}\\{task}.out"
     done_f = f"{REMOTE_TMP}\\{task}.done"
 
-    # Discover the console session's user.
+    # Discover an ACTIVE interactive session (GUI/desktop ops need a connected session; a
+    # Disconnected RDP session has no composed desktop, so fail with an actionable message).
     who = transport.run_ps(
-        "$u=(Get-CimInstance Win32_ComputerSystem).UserName; if(-not $u){"
-        "$s=quser 2>$null; if($s){($s|Select-Object -Skip 1|ForEach-Object{($_ -replace '^>','').Trim().Split(' ')[0]}|Select-Object -First 1)}}"
-        " else {$u}",
+        "$rows=@(qwinsta 2>$null);$active=$null;$disc=$null;"
+        "if($rows.Count -ge 2){$h=$rows[0];$iU=$h.IndexOf('USERNAME');$iS=$h.IndexOf('STATE');"
+        "if($iU -ge 0 -and $iS -gt $iU){foreach($l in ($rows|Select-Object -Skip 1)){"
+        "if($l.Length -le $iS){continue};"
+        "$u=$l.Substring($iU,$iS-$iU).Trim();$st=($l.Substring($iS).Trim() -split '\\s+')[0];"
+        "if($u){if($st -eq 'Active'){$active=$u}elseif($st -eq 'Disc'){$disc=$u}}}}}"
+        "if($active){'ACTIVE:'+$active}elseif($disc){'DISC:'+$disc}else{'NONE'}",
         timeout=30,
     )
-    user = (who.stdout or "").strip().splitlines()[-1].strip() if who.stdout.strip() else ""
-    if not user:
-        raise TransportError("no interactive user session found to run GUI script in")
+    line = (who.stdout or "").strip().splitlines()[-1].strip() if who.stdout.strip() else "NONE"
+    if line.startswith("ACTIVE:"):
+        user = line[len("ACTIVE:"):]
+    elif line.startswith("DISC:"):
+        raise TransportError(
+            f"the interactive session for '{line[len('DISC:'):]}' is Disconnected — GUI / as_user "
+            "ops need a connected desktop. Reconnect RDP, or call "
+            "rdp_connect_to_console(session_id) to move the session to the console (which "
+            "composes the desktop).")
+    else:
+        raise TransportError("no interactive user session on the box for GUI / as_user ops")
 
     wrapper = (
         "[Console]::OutputEncoding=[Text.Encoding]::UTF8;"

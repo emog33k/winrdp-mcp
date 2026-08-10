@@ -92,5 +92,5 @@ def ensure_remote_dirs() -> str:
     return (
         f"foreach($d in @({ps_string(REMOTE_ROOT)},{ps_string(REMOTE_TOOLS)},"
         f"{ps_string(REMOTE_TMP)})){{if(-not(Test-Path $d)){{"
-        "New-Item -ItemType Directory -Path $d -Force|Out-Null}}}"
+        "New-Item -ItemType Directory -Path $d -Force|Out-Null}}"
     )

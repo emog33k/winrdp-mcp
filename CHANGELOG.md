@@ -67,6 +67,20 @@ RDP boxes (Win10/11, Server 2016–2025) for Claude & Claude Code.
   of many round-trips. `provision_host(fast_transfer=True)` (default) ensures the channel:
   it uses SMB when 445 is open, otherwise installs OpenSSH so SFTP is available.
 
+### From production-use feedback
+- `run_powershell`/`run_ps` staging threshold lowered to 2.4 KB so scripts stay under the
+  worst-case command-line limit some boxes enforce (staging is cheap over the fast channel).
+- `file_write(binary=True)` writes decoded base64 bytes for arbitrary binary files.
+- `start_process(wait=False)` redirects the background process's stdout/stderr to log files
+  (returned as `stdout_log`/`stderr_log`) so silent background failures are diagnosable.
+- `as_user`/GUI ops now detect a Disconnected session and fail with an actionable message
+  (reconnect RDP or `rdp_connect_to_console`) instead of running on a non-composed desktop.
+- New `port_forward` / `port_forward_list` / `port_forward_stop`: SSH local tunnels to reach
+  a service bound to a box's 127.0.0.1 (which WinRM-launched processes cannot).
+- Fixed three latent PowerShell brace-balance / output bugs surfaced by a brace-balance
+  audit and live runs: `ensure_remote_dirs` (broke all tool-staging), `tail_file` (returned
+  megabytes of provider metadata), and `find_and_click`.
+
 ### Attribution
 Builds on the MIT-licensed [winremote-mcp](https://github.com/dddabtc/winremote-mcp) and
 [windows-admin-mcp](https://github.com/Cosmicjedi/windows-admin-mcp) — see `NOTICE`.

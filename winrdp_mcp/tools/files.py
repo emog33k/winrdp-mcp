@@ -38,9 +38,20 @@ def register(mcp, ctx) -> None:
         return ctx.exec_json(body, host=host, timeout=120)
 
     @mcp.tool
-    def file_write(path: str, content: str, host: Optional[str] = None, append: bool = False) -> dict:
-        """Write (or append) UTF-8 text to a file on a box."""
+    def file_write(path: str, content: str, host: Optional[str] = None, append: bool = False,
+                   binary: bool = False) -> dict:
+        """Write (or append) content to a file on a box.
+
+        binary=True treats `content` as base64 and writes the decoded bytes (for arbitrary
+        binary files) — goes over the fast channel (SMB/SFTP) with no size limit; otherwise
+        `content` is UTF-8 text.
+        """
         t = ctx.transport_for(host)
+        if binary:
+            import base64 as _b64
+            data = _b64.b64decode(content)
+            t.upload(data, path)
+            return {"ok": True, "path": path, "bytes": len(data), "binary": True}
         if append:
             # Use .NET AppendAllText with BOM-less UTF-8 so appended bytes are exact and
             # match the non-append (raw upload) path — Add-Content -Encoding utf8 prepends
@@ -198,9 +209,13 @@ def register(mcp, ctx) -> None:
     @mcp.tool
     def tail_file(path: str, host: Optional[str] = None, lines: int = 50) -> dict:
         """Return the last N lines of a text file on a box (snapshot)."""
+        # Cast each line to a plain [string]: Get-Content decorates its output strings with
+        # NoteProperties (PSPath/PSDrive/Provider/...) that ConvertTo-Json would otherwise
+        # expand into megabytes of provider/assembly metadata.
         body = (
-            f"$t=Get-Content -LiteralPath {ps.ps_string(path)} -Tail {int(lines)} -ErrorAction Stop;"
-            "$result=@{path=" + ps.ps_string(path) + ";lines=@($t)}"
+            f"$t=@(Get-Content -LiteralPath {ps.ps_string(path)} -Tail {int(lines)} -ErrorAction Stop|"
+            "ForEach-Object{[string]$_});"
+            "$result=@{path=" + ps.ps_string(path) + ";lines=$t}"
         )
         return ctx.exec_json(body, host=host, timeout=120)
 
