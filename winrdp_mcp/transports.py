@@ -652,13 +652,18 @@ class SMBFiles:
     via DCOM/WMI (impacket) or a scheduled-task trigger.
     """
 
-    def __init__(self, host: str, username: str, password: str, domain: str = "") -> None:
+    def __init__(self, host: str, username: str, password: str, domain: str = "",
+                 connection_timeout: int = 8) -> None:
         import smbclient
 
         self.host = host
         self._smbclient = smbclient
         user = f"{domain}\\{username}" if domain else username
-        smbclient.register_session(host, username=user, password=password)
+        # Bound the SMB negotiation: register_session defaults to a 60s timeout, so a box with
+        # 445 open at the TCP layer but SMB filtered (common on cloud VDS) would hang the whole
+        # fast-channel probe for a minute before falling back to SFTP/base64. Fail fast instead.
+        smbclient.register_session(host, username=user, password=password,
+                                   connection_timeout=connection_timeout)
 
     def _unc(self, windows_path: str) -> str:
         # C:\ProgramData\x -> \\host\C$\ProgramData\x

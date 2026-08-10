@@ -35,11 +35,14 @@ def cli() -> None:
 @click.option("--debug", is_flag=True, help="Verbose debug logging to stderr.")
 def serve(use_http: bool, bind: str, port: int, local: bool, debug: bool) -> None:
     """Run the MCP server (controller mode)."""
-    mcp, _ctx = build_server(local=local, debug=debug)
-    if use_http:
-        mcp.run(transport="http", host=bind, port=port)
-    else:
-        mcp.run()
+    mcp, ctx = build_server(local=local, debug=debug)
+    try:
+        if use_http:
+            mcp.run(transport="http", host=bind, port=port)
+        else:
+            mcp.run()
+    finally:
+        ctx.close()  # tear down cached transports / SSH tunnels on shutdown
 
 
 @cli.command()
@@ -50,11 +53,14 @@ def serve(use_http: bool, bind: str, port: int, local: bool, debug: bool) -> Non
 def agent(use_http: bool, bind: str, port: int, debug: bool) -> None:
     """Run on the box itself: manage this machine via the local transport."""
     seed = Host(alias="local", host="localhost", transport="local")
-    mcp, _ctx = build_server(local=True, seed_host=seed, debug=debug)
-    if use_http:
-        mcp.run(transport="http", host=bind, port=port)
-    else:
-        mcp.run()
+    mcp, ctx = build_server(local=True, seed_host=seed, debug=debug)
+    try:
+        if use_http:
+            mcp.run(transport="http", host=bind, port=port)
+        else:
+            mcp.run()
+    finally:
+        ctx.close()
 
 
 @cli.command()

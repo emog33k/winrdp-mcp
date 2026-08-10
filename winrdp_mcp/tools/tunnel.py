@@ -8,6 +8,7 @@ opens a port on the operator machine that forwards, through the box's SSH, to th
 
 from __future__ import annotations
 
+import atexit
 import select
 import socketserver
 import threading
@@ -18,6 +19,19 @@ from .. import log
 _log = log.get("tunnel")
 _TUNNELS: dict[int, "_Tunnel"] = {}
 _LOCK = threading.RLock()
+
+
+@atexit.register
+def _close_all_tunnels() -> None:
+    """Stop every open SSH tunnel (server thread + paramiko client) on process exit."""
+    with _LOCK:
+        tunnels = list(_TUNNELS.values())
+        _TUNNELS.clear()
+    for t in tunnels:
+        try:
+            t.stop()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 class _Handler(socketserver.BaseRequestHandler):

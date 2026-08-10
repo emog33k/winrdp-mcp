@@ -3,6 +3,27 @@
 All notable changes to winrdp-mcp are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses semantic versioning.
 
+## [0.1.2] — 2026-08-10
+
+### Fixed
+- **SMB fast-channel probe now fails fast.** `smbprotocol` defaults to a 60s connection
+  timeout, so a box with 445 open at the TCP layer but SMB filtered (common on cloud VDS)
+  would hang the first upload for a minute before falling back to SFTP/base64. Bounded to 8s.
+- **DXT build (`dxt/build.ps1`) now produces a valid bundle.** Two Windows PowerShell 5.1
+  bugs fixed: pip's stderr advisory no longer aborts the vendoring step, and the archive is
+  written with forward-slash entry paths (Compress-Archive emitted backslashes, violating the
+  ZIP spec and breaking the extension loader). Verified: 23 MB self-contained `.dxt`.
+
+### Added
+- Regression test suite (`tests/test_security_fixes.py`) locking in every 0.1.1 fix: the
+  chunk-write inline invariant + non-staging routing (recursion guard), injection validation,
+  provisioning omits the weakening settings, secrets stay out of the script body, log
+  redaction of `%s` args, and scrypt KDF + legacy-ciphertext migration.
+
+### Changed
+- Graceful shutdown: `serve` / `agent` close cached transports on exit, and open SSH tunnels
+  are torn down via an `atexit` hook.
+
 ## [0.1.1] — 2026-08-10
 
 Security & reliability hardening from a full-code audit. No tool signatures removed;
