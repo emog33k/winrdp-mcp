@@ -17,6 +17,7 @@ to the box — that is the whole point.
 from __future__ import annotations
 
 import base64
+import binascii
 import io
 import os
 import shlex
@@ -26,6 +27,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from . import log, ps
+from .config import REMOTE_TMP
 
 _log = log.get("transport")
 
@@ -63,8 +65,14 @@ def port_open(host: str, port: int, timeout: float = 3.0) -> bool:
         return False
 
 
-# Upload/download chunk size (base64 chars) kept well under SOAP/line limits.
-_CHUNK = 6000
+# Upload chunk size (base64 chars). Each chunk rides inside a run_ps whose script pywinrm
+# re-encodes to UTF-16LE base64 (~2.7x growth) onto a single command line; keep the chunk
+# small enough that the encoded command stays well under the WSMan/cmd command-line limit.
+_CHUNK = 2400
+
+# A run_ps script longer than this is staged to a temp .ps1 and run via `-File` instead of
+# being packed onto one command line (which would overflow the WSMan/cmd length limit).
+_MAX_INLINE_PS = 6000
 
 
 class Transport:
@@ -176,6 +184,7 @@ class WinRMTransport(Transport):
         self._password = password
         self._auth = auth
         self._cert_validation = cert_validation
+        self._fchan = None  # lazy fast file channel: None=untried, False=none, else (kind,obj)
         self._connect()
         if use_ssl and cert_validation == "ignore":
             _log.warning("winrm %s: HTTPS with cert validation DISABLED (MITM-exploitable); "
@@ -233,6 +242,10 @@ class WinRMTransport(Transport):
         # WSMan shell) is not thread-safe; abandoning a call mid-flight corrupts it and every
         # later request returns HTTP 400. Bounding comes from read_timeout_sec; a dropped or
         # wedged connection is healed by _run reconnecting and retrying once.
+        if len(script) > _MAX_INLINE_PS:
+            # pywinrm packs run_ps as `powershell -EncodedCommand <base64>` on ONE command
+            # line; a big script overflows the length limit. Stage it and run via -File.
+            return self._run_ps_via_file(script, timeout)
         _log.debug("winrm run_ps %s: %s", self.host, script[:120].replace("\n", " "))
         r = self._run(lambda: self._session.run_ps(script))
         return ExecResult(
@@ -241,6 +254,26 @@ class WinRMTransport(Transport):
             rc=r.status_code,
         )
 
+    def _run_ps_via_file(self, script: str, timeout: int) -> ExecResult:
+        rid = binascii.hexlify(os.urandom(6)).decode()
+        remote = f"{REMOTE_TMP}\\winrdp_ps_{rid}.ps1"
+        # UTF-8 BOM so `-File` decodes correctly on 5.1 and 7; upload chunks stay small.
+        self.upload(script.encode("utf-8-sig"), remote)
+        try:
+            r = self._run(lambda: self._session.run_cmd(
+                "powershell", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", remote]))
+            return ExecResult(
+                stdout=r.std_out.decode("utf-8", "replace"),
+                stderr=r.std_err.decode("utf-8", "replace"),
+                rc=r.status_code,
+            )
+        finally:
+            try:
+                self._run(lambda: self._session.run_ps(
+                    f"Remove-Item -LiteralPath {ps.ps_string(remote)} -Force -ErrorAction SilentlyContinue"))
+            except Exception:
+                pass
+
     def run_cmd(self, command: str, timeout: int = 120) -> ExecResult:
         r = self._run(lambda: self._session.run_cmd("cmd.exe", ["/c", command]))
         return ExecResult(
@@ -248,6 +281,69 @@ class WinRMTransport(Transport):
             stderr=r.std_err.decode("utf-8", "replace"),
             rc=r.status_code,
         )
+
+    def _fast_channel(self):
+        """Pick (once, cached) the fastest file channel to the box: SMB admin share, else
+        SFTP over SSH, else None (caller falls back to chunked base64 over run_ps).
+
+        Chunked run_ps is many round-trips; SMB/SFTP move a file in one shot. SMB needs no
+        install (445 + ADMIN$); SFTP needs OpenSSH (which provisioning can enable)."""
+        if self._fchan is not None:
+            return self._fchan or None
+        from .config import SMB_PORT, SSH_PORT
+        dom = self._user.split("\\")[0] if "\\" in self._user else ""
+        usr = self._user.split("\\")[-1]
+        # 1) SMB admin share — no install required
+        try:
+            if port_open(self.host, SMB_PORT, timeout=2):
+                smb = SMBFiles(self.host, usr, self._password, dom)
+                if smb.probe():
+                    self._fchan = ("smb", smb)
+                    _log.debug("winrm %s: fast file channel = SMB", self.host)
+                    return self._fchan
+        except Exception as e:  # noqa: BLE001
+            _log.debug("winrm %s: SMB channel unavailable: %s", self.host, e)
+        # 2) SFTP over SSH
+        try:
+            if port_open(self.host, SSH_PORT, timeout=2):
+                ssh = SSHTransport(self.host, usr, self._password, port=SSH_PORT)
+                self._fchan = ("sftp", ssh)
+                _log.debug("winrm %s: fast file channel = SFTP", self.host)
+                return self._fchan
+        except Exception as e:  # noqa: BLE001
+            _log.debug("winrm %s: SFTP channel unavailable: %s", self.host, e)
+        self._fchan = False
+        return None
+
+    def upload(self, data: bytes, remote_path: str, timeout: int = 300) -> None:
+        ch = self._fast_channel()
+        if ch:
+            kind, obj = ch
+            try:
+                obj.write(data, remote_path) if kind == "smb" else obj.upload(data, remote_path, timeout)
+                return
+            except Exception as e:  # noqa: BLE001
+                _log.debug("winrm %s: fast upload failed (%s); chunked fallback", self.host, e)
+                self._fchan = False
+        super().upload(data, remote_path, timeout=timeout)
+
+    def download(self, remote_path: str, timeout: int = 300) -> bytes:
+        ch = self._fast_channel()
+        if ch:
+            kind, obj = ch
+            try:
+                return obj.read(remote_path) if kind == "smb" else obj.download(remote_path, timeout)
+            except Exception as e:  # noqa: BLE001
+                _log.debug("winrm %s: fast download failed (%s); base64 fallback", self.host, e)
+                self._fchan = False
+        return super().download(remote_path, timeout=timeout)
+
+    def close(self) -> None:
+        if isinstance(self._fchan, tuple) and self._fchan[0] == "sftp":
+            try:
+                self._fchan[1].close()
+            except Exception:
+                pass
 
     def probe(self) -> bool:
         try:
@@ -295,8 +391,24 @@ class SSHTransport(Transport):
         )
 
     def run_ps(self, script: str, timeout: int = 120) -> ExecResult:
+        if len(script) > _MAX_INLINE_PS:
+            return self._run_ps_via_file(script, timeout)
         enc = ps.encode_command(script)
         return self._exec(f"powershell -NoProfile -NonInteractive -EncodedCommand {enc}", timeout)
+
+    def _run_ps_via_file(self, script: str, timeout: int) -> ExecResult:
+        rid = binascii.hexlify(os.urandom(6)).decode()
+        remote = f"{REMOTE_TMP}\\winrdp_ps_{rid}.ps1"
+        self.upload(script.encode("utf-8-sig"), remote)  # SFTP — no length limit
+        try:
+            return self._exec(
+                f'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{remote}"', timeout)
+        finally:
+            try:
+                self._exec(f'powershell -NoProfile -Command "Remove-Item -LiteralPath '
+                           f'\'{remote}\' -Force -ErrorAction SilentlyContinue"', 30)
+            except Exception:
+                pass
 
     def run_cmd(self, command: str, timeout: int = 120) -> ExecResult:
         # The SSH DefaultShell is set to PowerShell by provisioning, so a bare command
@@ -358,6 +470,8 @@ class LocalTransport(Transport):
         return "powershell.exe" if os.name == "nt" else "pwsh"
 
     def run_ps(self, script: str, timeout: int = 120) -> ExecResult:
+        if len(script) > _MAX_INLINE_PS:
+            return self._run_ps_via_file(script, timeout)
         enc = ps.encode_command(script)
         proc = subprocess.run(
             [self._powershell_exe(), "-NoProfile", "-NonInteractive", "-EncodedCommand", enc],
@@ -369,6 +483,30 @@ class LocalTransport(Transport):
             proc.stderr.decode("utf-8", "replace"),
             proc.returncode,
         )
+
+    def _run_ps_via_file(self, script: str, timeout: int) -> ExecResult:
+        import tempfile
+
+        fd, path = tempfile.mkstemp(suffix=".ps1")
+        os.close(fd)
+        with open(path, "wb") as f:
+            f.write(script.encode("utf-8-sig"))
+        try:
+            proc = subprocess.run(
+                [self._powershell_exe(), "-NoProfile", "-NonInteractive",
+                 "-ExecutionPolicy", "Bypass", "-File", path],
+                capture_output=True, timeout=timeout,
+            )
+            return ExecResult(
+                proc.stdout.decode("utf-8", "replace"),
+                proc.stderr.decode("utf-8", "replace"),
+                proc.returncode,
+            )
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
     def run_cmd(self, command: str, timeout: int = 120) -> ExecResult:
         if os.name == "nt":

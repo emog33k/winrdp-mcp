@@ -57,6 +57,15 @@ RDP boxes (Win10/11, Server 2016–2025) for Claude & Claude Code.
 - HTTP-first WinRM ordering (NTLM-encrypted, faster; HTTPS only when `use_ssl`).
 - Argument validation/quoting across all tools; `rdp_connection_file` no longer returns the
   plaintext password; robust `qwinsta` session parsing; BOM-free file appends.
+- Large-script / large-file handling: a `run_ps` script over ~6 KB is staged to a temp
+  `.ps1` and run via `-File` (avoids the WSMan/cmd command-line length limit that pywinrm's
+  `-EncodedCommand` packing hits, on all transports); the upload chunk was cut to a size
+  that stays under that limit after re-encoding.
+- Fast file channel: WinRM uploads/downloads of any size now transparently use a cached
+  **SMB** (`ADMIN$`, no install) channel when 445 is reachable, else **SFTP** over SSH,
+  falling back to chunked base64 only when neither is available — instant transfers instead
+  of many round-trips. `provision_host(fast_transfer=True)` (default) ensures the channel:
+  it uses SMB when 445 is open, otherwise installs OpenSSH so SFTP is available.
 
 ### Attribution
 Builds on the MIT-licensed [winremote-mcp](https://github.com/dddabtc/winremote-mcp) and

@@ -93,16 +93,20 @@ def register(mcp, ctx) -> None:
         host: Optional[str] = None,
         enable_ssh: bool = False,
         allow_wmi_bootstrap: bool = True,
+        fast_transfer: bool = True,
     ) -> dict:
         """Zero-config provision: make a box remotely manageable no matter its state.
 
         Climbs a ladder — WinRM -> SSH -> SMB/WMI cold-start -> bootstrap one-liner —
         turning on WinRM, opening the firewall, and fixing local-admin token filtering.
-        Run this once per box right after add_host. Returns a detailed report; if it
-        cannot auto-enable remoting, `bootstrap_oneliner` is a command to paste into an
-        existing RDP session on the box once.
+        fast_transfer=True also ensures a fast file channel: SMB (ADMIN$, no install) when
+        445 is open, otherwise it installs OpenSSH so uploads use SFTP instead of the slow
+        chunked path. Run this once per box right after add_host. Returns a detailed report;
+        if it cannot auto-enable remoting, `bootstrap_oneliner` is a command to paste into
+        an existing RDP session on the box once.
         """
-        return ctx.provision(host, enable_ssh=enable_ssh, allow_wmi_bootstrap=allow_wmi_bootstrap)
+        return ctx.provision(host, enable_ssh=enable_ssh, allow_wmi_bootstrap=allow_wmi_bootstrap,
+                             fast_transfer=fast_transfer)
 
     @mcp.tool
     def run_on_hosts(

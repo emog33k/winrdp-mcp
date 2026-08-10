@@ -181,8 +181,33 @@ def bootstrap_oneliner(h: Host) -> str:
     return f"powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand {b64}"
 
 
-def provision(h: Host, *, enable_ssh: bool = False, allow_wmi_bootstrap: bool = True) -> ProvisionReport:
-    """Make ``h`` manageable, climbing the ladder. Mutates ``h.resolved_transport``."""
+def _ensure_fast_transfer(h: Host, transport: Transport, rep: ProvisionReport) -> None:
+    """Guarantee a fast file channel exists. SMB (ADMIN$) needs no install and is preferred;
+    only when 445 is blocked do we install OpenSSH so uploads can use SFTP instead of the
+    slow chunked-base64-over-WinRM path."""
+    if rep.reachable_ports.get("smb"):
+        rep.actions.append("fast-transfer=SMB (admin share, no install)")
+        return
+    if port_open(h.host, config.SSH_PORT):
+        rep.actions.append("fast-transfer=SFTP (SSH already up)")
+        return
+    try:
+        r = transport.run_ps(ENABLE_SSH_PS, timeout=300)
+        if "WINRDP_SSH_ENABLED" in r.stdout:
+            rep.ssh_enabled = True
+            rep.actions.append("fast-transfer=SFTP (installed OpenSSH for fast uploads)")
+        else:
+            rep.actions.append("fast-transfer=chunked (OpenSSH install unconfirmed)")
+    except Exception as e:  # noqa: BLE001
+        rep.actions.append(f"fast-transfer=chunked (OpenSSH install failed: {e})")
+
+
+def provision(h: Host, *, enable_ssh: bool = False, allow_wmi_bootstrap: bool = True,
+              fast_transfer: bool = True) -> ProvisionReport:
+    """Make ``h`` manageable, climbing the ladder. Mutates ``h.resolved_transport``.
+
+    fast_transfer: also ensure a fast file channel (SMB, else install OpenSSH for SFTP) so
+    uploads are instant instead of chunked base64 over WinRM."""
     rep = ProvisionReport(alias=h.alias, host=h.host)
     rep.reachable_ports = _scan(h.host)
     rep.bootstrap_oneliner = bootstrap_oneliner(h)
@@ -202,6 +227,8 @@ def provision(h: Host, *, enable_ssh: bool = False, allow_wmi_bootstrap: bool = 
         rep.winrm_enabled = True
         rep.actions.append("winrm-already-reachable")
         _harden_winrm(t, rep)
+        if fast_transfer:
+            _ensure_fast_transfer(h, t, rep)
         rep.success = True
         rep.message = "WinRM reachable; hardened and ready."
         h.resolved_transport = "winrm"
@@ -243,6 +270,8 @@ def provision(h: Host, *, enable_ssh: bool = False, allow_wmi_bootstrap: bool = 
                     rep.transport = "winrm"
                     h.resolved_transport = "winrm"
                     _harden_winrm(t3, rep)
+                    if fast_transfer:
+                        _ensure_fast_transfer(h, t3, rep)
                     rep.success = True
                     rep.message = "Cold-started WinRM via SMB+WMI bootstrap."
                     return rep
