@@ -18,16 +18,35 @@ from winrdp_mcp.transports import _CHUNK, _MAX_INLINE_PS, ExecResult, Transport
 
 
 # --- #1 chunked-upload recursion --------------------------------------------
+def _chunk_write_script(chunk_len: int) -> str:
+    """Mirror the AppendAllText chunk-write in Transport.upload for a full-size chunk."""
+    from winrdp_mcp.config import REMOTE_TMP
+
+    tmp = REMOTE_TMP + r"\winrdp_ps_0123456789ab.ps1.gz.b64"  # the staging path upload() uses
+    return (f"[IO.File]::AppendAllText({ps.ps_string(tmp)},"
+            f"{ps.ps_string('A' * chunk_len)},[Text.Encoding]::ASCII)")
+
+
 def test_chunk_write_stays_under_inline_threshold():
     """A single chunk-write must fit inline; otherwise the WinRM chunk loop would cross the
     staging threshold and re-upload → infinite recursion."""
-    from winrdp_mcp.config import REMOTE_TMP
-
-    tmp = REMOTE_TMP + r"\winrdp_ps_0123456789ab.ps1.b64"  # the staging path upload() uses
-    script = (f"Add-Content -LiteralPath {ps.ps_string(tmp)} "
-              f"-Value {ps.ps_string('A' * _CHUNK)} -NoNewline")
+    script = _chunk_write_script(_CHUNK)
     assert len(script) < _MAX_INLINE_PS, (
         f"chunk write is {len(script)} chars, not < _MAX_INLINE_PS ({_MAX_INLINE_PS})")
+
+
+def test_encoded_chunk_command_stays_under_command_line_limit():
+    """pywinrm ships run_ps as `powershell -EncodedCommand <utf16le-base64>` — a ~2.67x
+    expansion. A full chunk-write (even to a deep destination path) must keep that command
+    line under the ~8192 WSMan/cmd limit. This is the constraint that a too-large chunk hits
+    (the raw base64 "looking" ~4k is not what reaches the wire)."""
+    from winrdp_mcp.config import REMOTE_TMP
+
+    deep = REMOTE_TMP + "\\" + "d" * 120 + ".gz.b64"
+    script = (f"[IO.File]::AppendAllText({ps.ps_string(deep)},"
+              f"{ps.ps_string('A' * _CHUNK)},[Text.Encoding]::ASCII)")
+    encoded = "powershell -EncodedCommand " + base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    assert len(encoded) < 8192, f"encoded chunk command is {len(encoded)} chars (>= 8192 limit)"
 
 
 class _Recorder(Transport):
@@ -52,8 +71,8 @@ def test_upload_chunks_use_non_staging_inline_path():
     so an upload can't re-enter staging on a transport that stages large scripts."""
     r = _Recorder()
     Transport.upload(r, b"x" * (3 * _CHUNK), r"C:\tmp\f.bin")
-    assert any("Add-Content" in s for s in r.inline)
-    assert not any("Add-Content" in s for s in r.normal)
+    assert any("AppendAllText" in s for s in r.inline)
+    assert not any("AppendAllText" in s for s in r.normal)
 
 
 # --- #2 / #4 / #13 argument-injection validation ----------------------------

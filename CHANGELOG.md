@@ -3,6 +3,25 @@
 All notable changes to winrdp-mcp are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses semantic versioning.
 
+## [0.1.4] — 2026-08-10
+
+### Fixed
+- **Base64 WinRM upload fallback is robust and faster.** This path only runs when a box
+  exposes *only* WinRM (both SMB/445 and SSH/22 unreachable, so the fast SMB/SFTP channels
+  can't be used). Two fixes:
+  - Chunks are written with `[IO.File]::AppendAllText` (opens→appends→closes atomically per
+    call) instead of `Add-Content`, which could fail *"Stream was not readable"* when a prior
+    handle wasn't released.
+  - The payload is **gzip-compressed** before chunking — a staged `.ps1` (the usual payload)
+    compresses several-fold, cutting the number of round-trips proportionally. The box
+    decompresses on finalize.
+  - Chunk size stays well under the real limit: pywinrm ships each write as `powershell
+    -EncodedCommand <utf16le-base64>` (~2.67× expansion), so the command line for a full
+    chunk is ~4.9k — comfortably under ~8192. Locked in by a regression test.
+
+  (Reachable SSH still uses SFTP directly, and reachable SMB uses the admin share — both
+  single-shot; the chunked path is only the last resort for WinRM-only boxes.)
+
 ## [0.1.3] — 2026-08-10
 
 ### Added

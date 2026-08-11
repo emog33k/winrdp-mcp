@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import gzip
 import io
 import os
 import shlex
@@ -74,14 +75,16 @@ def port_open(host: str, port: int, timeout: float = 3.0) -> bool:
         return False
 
 
-# Upload chunk size (base64 chars). Each chunk rides inside a run_ps whose script pywinrm
-# re-encodes to UTF-16LE base64 (~2.7x growth) onto a single command line; keep the chunk
-# small enough that the encoded command stays well under the WSMan/cmd command-line limit.
-# MUST stay well below _MAX_INLINE_PS: the chunk write is `Add-Content ... -Value '<chunk>'`
-# (~110 chars of scaffolding + path), and if that script crossed _MAX_INLINE_PS the WinRM
-# transport would try to STAGE it — which uploads via this very chunk loop → infinite
-# recursion. The chunk loop uses _run_ps_inline (never stages), and this headroom is the
-# second guard.
+# Upload chunk size (base64 chars) written per AppendAllText call. Two hard limits bound it:
+#   1. Command line: pywinrm's run_ps ships the chunk-write script as `powershell
+#      -EncodedCommand <b64>` where the script is re-encoded UTF-16LE→base64 (~2.67x). So the
+#      command line ≈ (chunk + ~95 scaffolding) * 2.67. At 1600 that's ~4.6k — comfortably
+#      under the ~8192 command-line limit (see test_encoded_chunk_command_under_limit). A
+#      bigger chunk is NOT safe just because it "looks" ~4k of base64 — the 2.67x expansion is
+#      what actually hits the wire.
+#   2. Staging recursion: the chunk-write script must stay under _MAX_INLINE_PS or the WinRM
+#      transport would try to stage it (uploading via this very loop → recursion). The loop
+#      uses _run_ps_inline (never stages) as the primary guard; this headroom is the backstop.
 _CHUNK = 1600
 
 # A run_ps script longer than this is staged to a temp .ps1 and run via `-File` instead of
@@ -151,25 +154,34 @@ class Transport:
             ).raise_for_status("write empty file")
             return
 
-        b64 = base64.b64encode(data).decode("ascii")
-        tmp = remote_path + ".b64"
-        # write the base64 text in chunks
+        # gzip first: the fallback's cost is round-trips, and its usual payload (a staged .ps1)
+        # compresses ~3-5x, so this cuts chunk count proportionally. The box decompresses on
+        # finalize. (Incompressible data costs ~18 bytes of header — negligible.)
+        b64 = base64.b64encode(gzip.compress(data)).decode("ascii")
+        tmp = remote_path + ".gz.b64"
         self._run_ps_inline(
             f"if(Test-Path {ps.ps_string(tmp)}){{Remove-Item -LiteralPath {ps.ps_string(tmp)} -Force}}",
             idempotent=False,
         ).raise_for_status()
         for i in range(0, len(b64), _CHUNK):
             chunk = b64[i:i + _CHUNK]
-            # _run_ps_inline (not run_ps): a chunk write must never trip the staging
-            # threshold — that would upload via this same loop and recurse. idempotent=False:
-            # a blind reconnect-retry would append the chunk twice and corrupt the file.
+            # [IO.File]::AppendAllText opens→appends→closes the file atomically per call — no
+            # lingering stream handle (Add-Content could fail "Stream was not readable" when a
+            # prior handle wasn't released). ASCII: the payload is pure base64.
+            # _run_ps_inline (not run_ps): a chunk write must never trip the staging threshold
+            # — that would upload via this same loop and recurse. idempotent=False: a blind
+            # reconnect-retry would append the chunk twice and corrupt the file.
             self._run_ps_inline(
-                f"Add-Content -LiteralPath {ps.ps_string(tmp)} -Value {ps.ps_string(chunk)} -NoNewline",
+                f"[IO.File]::AppendAllText({ps.ps_string(tmp)},{ps.ps_string(chunk)},[Text.Encoding]::ASCII)",
                 timeout=timeout, idempotent=False,
             ).raise_for_status("write chunk")
+        # decode base64 → gunzip → write the file, all on the box.
         self.run_ps(
-            f"$b=[Convert]::FromBase64String((Get-Content -LiteralPath {ps.ps_string(tmp)} -Raw));"
-            f"[IO.File]::WriteAllBytes({ps.ps_string(remote_path)},$b);"
+            f"$c=[Convert]::FromBase64String((Get-Content -LiteralPath {ps.ps_string(tmp)} -Raw));"
+            "$mi=New-Object System.IO.MemoryStream(,$c);"
+            "$gz=New-Object System.IO.Compression.GZipStream($mi,[System.IO.Compression.CompressionMode]::Decompress);"
+            "$mo=New-Object System.IO.MemoryStream;$gz.CopyTo($mo);$gz.Dispose();$mi.Dispose();"
+            f"[IO.File]::WriteAllBytes({ps.ps_string(remote_path)},$mo.ToArray());$mo.Dispose();"
             f"Remove-Item -LiteralPath {ps.ps_string(tmp)} -Force",
             timeout=timeout,
         ).raise_for_status("finalize upload")
