@@ -69,12 +69,14 @@ def register(mcp, ctx) -> None:
 
     @mcp.tool
     def rdp_sessions(host: Optional[str] = None) -> list:
-        """List RDP/console sessions (id, user, state) via ``qwinsta``.
+        """List RDP/console sessions (id, user, state).
 
-        Parsed by the header column offsets so listener/disconnected rows (which have a
-        blank USERNAME) don't shift the fields."""
+        Uses ``qwinsta`` when available so multi-session/RDP hosts keep their full session
+        list. Windows Home editions may omit that utility, in which case return the active
+        local console user's Explorer session instead."""
         body = (
-            "$out=@(qwinsta 2>$null);$result=@();"
+            "$result=@();$q=Get-Command qwinsta -ErrorAction SilentlyContinue;"
+            "if($q){$out=@(& $q.Source 2>$null)}else{$out=@()};"
             "if($out.Count -ge 2){"
             "$h=$out[0];$iU=$h.IndexOf('USERNAME');$iI=$h.IndexOf('ID');"
             "$iS=$h.IndexOf('STATE');$iT=$h.IndexOf('TYPE');"
@@ -83,7 +85,17 @@ def register(mcp, ctx) -> None:
             "$result=@($out|Select-Object -Skip 1|Where-Object{$_.Trim()}|ForEach-Object{"
             "$l=$_;@{"
             "session=(_sub $l 0 $iU).TrimStart('>').Trim();"
-            "user=(_sub $l $iU $iI);id=(_sub $l $iI $iS);state=(_sub $l $iS $iT)}})}"
+            "user=(_sub $l $iU $iI);id=(_sub $l $iI $iS);state=(_sub $l $iS $iT)}})};"
+            "if($result.Count -eq 0){"
+            "$u=[string](Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).UserName;"
+            "if($u){$leaf=($u -split '\\\\')[-1];"
+            "$shells=@(Get-CimInstance Win32_Process -Filter \"Name='explorer.exe'\" -ErrorAction SilentlyContinue);"
+            "foreach($p in $shells){"
+            "$o=Invoke-CimMethod -InputObject $p -MethodName GetOwner -ErrorAction SilentlyContinue;"
+            "if($o){$full=if($o.Domain){$o.Domain+'\\'+$o.User}else{$o.User};"
+            "if(($full -ieq $u)-or($o.User -ieq $leaf)){"
+            "$result=@(@{session='console';user=$u;id=[string]$p.SessionId;state='Active'});break}}}}"
+            "}"
         )
         return ps.as_list(ctx.exec_json(body, host=host))
 
