@@ -41,7 +41,27 @@ _SESSION_PARSE_PS = (
     "if($u){if($st -eq 'Active'){$active=$u}elseif($st -eq 'Disc'){$disc=$u}}}}}"
     "if($active){'ACTIVE:'+$active}elseif($disc){'DISC:'+$disc}else{'NONE'}"
 )
-ACTIVE_SESSION_PROBE_PS = "$rows=@(qwinsta 2>$null);" + _SESSION_PARSE_PS
+# Windows Home editions may ship without qwinsta.exe. When it is missing, fall back to
+# the console user reported by Win32_ComputerSystem, confirmed live by an explorer.exe
+# owned by that user (so a logged-off box still reports NONE). $rows is emitted as
+# ACTIVE:<user> or NONE; the disconnected case does not arise on this single-user path.
+_HOME_FALLBACK_PS = (
+    "$u=[string](Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).UserName;"
+    r"if($u){$leaf=($u -split '\\')[-1];$found=$false;"
+    "$shells=@(Get-CimInstance Win32_Process -Filter \"Name='explorer.exe'\" -ErrorAction SilentlyContinue);"
+    "foreach($p in $shells){"
+    "$o=Invoke-CimMethod -InputObject $p -MethodName GetOwner -ErrorAction SilentlyContinue;"
+    r"if($o){$full=if($o.Domain){$o.Domain+'\'+$o.User}else{$o.User};"
+    "if(($full -ieq $u)-or($o.User -ieq $leaf)){$found=$true;break}}}"
+    "if($found){'ACTIVE:'+$u}else{'NONE'}"
+    "}else{'NONE'}"
+)
+# Prefer qwinsta (keeps multi-session/RDP hosts complete); fall back on Home boxes.
+ACTIVE_SESSION_PROBE_PS = (
+    "$q=Get-Command qwinsta -ErrorAction SilentlyContinue;"
+    "if($q){$rows=@(& $q.Source 2>$null);" + _SESSION_PARSE_PS + "}"
+    "else{" + _HOME_FALLBACK_PS + "}"
+)
 
 
 @dataclass
