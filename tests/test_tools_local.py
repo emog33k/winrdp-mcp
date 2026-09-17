@@ -61,7 +61,8 @@ def test_rdp_sessions_parses_blank_username(tools):
     # every row must have all four keys; ids are numeric strings
     for r in rows:
         assert set(r) == {"session", "user", "id", "state"}
-    # at least one listener/disconnected row has a numeric id and a state token
+    # Full Windows editions include listener/disconnected rows via qwinsta; Windows Home
+    # may omit qwinsta and return only the active console Explorer session instead.
     assert any(r["id"].isdigit() and r["state"] for r in rows)
 
 
