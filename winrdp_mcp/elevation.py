@@ -25,6 +25,24 @@ from . import ps
 from .config import REMOTE_TMP
 from .transports import ExecResult, Transport, TransportError
 
+# Parse qwinsta's fixed-width columns into the active (or disconnected) interactive user.
+# Given $rows (qwinsta's output lines), emit ACTIVE:<user>, DISC:<user>, or NONE.
+# The USERNAME slice must stop at the ID column, not at STATE: the ID column sits between
+# them, so slicing to STATE lets the session-id digits bleed into the username (e.g. a
+# short "admin" becomes "admin                     1"). That value fails the SID lookup in
+# Register-ScheduledTask (ERROR_NONE_MAPPED). Cutting at ID also keeps a blank-username row
+# (services/listeners) empty so it is skipped, and preserves usernames that contain spaces.
+_SESSION_PARSE_PS = (
+    "$active=$null;$disc=$null;"
+    "if($rows.Count -ge 2){$h=$rows[0];$iU=$h.IndexOf('USERNAME');$iI=$h.IndexOf('ID');$iS=$h.IndexOf('STATE');"
+    "if($iU -ge 0 -and $iI -gt $iU -and $iS -gt $iI){foreach($l in ($rows|Select-Object -Skip 1)){"
+    "if($l.Length -le $iS){continue};"
+    "$u=$l.Substring($iU,$iI-$iU).Trim();$st=($l.Substring($iS).Trim() -split '\\s+')[0];"
+    "if($u){if($st -eq 'Active'){$active=$u}elseif($st -eq 'Disc'){$disc=$u}}}}}"
+    "if($active){'ACTIVE:'+$active}elseif($disc){'DISC:'+$disc}else{'NONE'}"
+)
+ACTIVE_SESSION_PROBE_PS = "$rows=@(qwinsta 2>$null);" + _SESSION_PARSE_PS
+
 
 @dataclass
 class ElevatedResult:
@@ -184,16 +202,7 @@ def run_in_user_session(transport: Transport, script: str, *, timeout: int = 120
 
     # Discover an ACTIVE interactive session (GUI/desktop ops need a connected session; a
     # Disconnected RDP session has no composed desktop, so fail with an actionable message).
-    who = transport.run_ps(
-        "$rows=@(qwinsta 2>$null);$active=$null;$disc=$null;"
-        "if($rows.Count -ge 2){$h=$rows[0];$iU=$h.IndexOf('USERNAME');$iS=$h.IndexOf('STATE');"
-        "if($iU -ge 0 -and $iS -gt $iU){foreach($l in ($rows|Select-Object -Skip 1)){"
-        "if($l.Length -le $iS){continue};"
-        "$u=$l.Substring($iU,$iS-$iU).Trim();$st=($l.Substring($iS).Trim() -split '\\s+')[0];"
-        "if($u){if($st -eq 'Active'){$active=$u}elseif($st -eq 'Disc'){$disc=$u}}}}}"
-        "if($active){'ACTIVE:'+$active}elseif($disc){'DISC:'+$disc}else{'NONE'}",
-        timeout=30,
-    )
+    who = transport.run_ps(ACTIVE_SESSION_PROBE_PS, timeout=30)
     line = (who.stdout or "").strip().splitlines()[-1].strip() if who.stdout.strip() else "NONE"
     if line.startswith("ACTIVE:"):
         user = line[len("ACTIVE:"):]
@@ -214,7 +223,7 @@ def run_in_user_session(transport: Transport, script: str, *, timeout: int = 120
         f"}}finally{{Set-Content -LiteralPath {ps.ps_string(done_f)} -Value \"rc=$rc\" -Encoding ascii}}"
     )
     transport.upload(wrapper.encode("utf-8-sig"), remote_ps)
-    arg = f'-NoProfile -ExecutionPolicy Bypass -File "{remote_ps}"'
+    arg = f'-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{remote_ps}"'
     register = (
         "$ErrorActionPreference='Stop';"
         f"$a=New-ScheduledTaskAction -Execute 'powershell.exe' -Argument {ps.ps_string(arg)};"
