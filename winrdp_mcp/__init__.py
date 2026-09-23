@@ -15,5 +15,5 @@ windows-admin-mcp (github.com/Cosmicjedi/windows-admin-mcp). See NOTICE.
 
 from __future__ import annotations
 
-__version__ = "0.1.4"
+__version__ = "0.1.5"
 __all__ = ["__version__"]

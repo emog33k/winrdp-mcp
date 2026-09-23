@@ -3,6 +3,29 @@
 All notable changes to winrdp-mcp are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses semantic versioning.
 
+## [0.1.5] — 2026-09-23
+
+### Fixed
+- **`screenshot` / `as_user` / every interactive GUI op works again (`qwinsta` parse).**
+  Session discovery sliced the `USERNAME` column up to `STATE`, but the `ID` column sits
+  between them, so a short username kept the trailing session-id digits (e.g. `admin` became
+  `"admin                     1"`). That value failed the name-to-SID lookup in
+  `Register-ScheduledTask` (`ERROR_NONE_MAPPED`), breaking `screenshot`,
+  `start_process(as_user=True)`, `run_powershell(as_user=True)`, mouse/keys, UI Automation
+  and OCR. The slice now stops at the `ID` column, which also skips blank-username rows
+  (services/listeners) and preserves local usernames that contain spaces. (#1)
+- **Interactive-session task no longer flashes a console window.** The scheduled task that
+  runs GUI / `as_user` work in the desktop session launched `powershell.exe` without
+  `-WindowStyle Hidden`, briefly showing a console on the target desktop. Added it. The two
+  `SYSTEM` tasks run in session 0 and never render a window, so they are unchanged. (#2)
+
+### Added
+- **Windows Home interactive sessions.** When `qwinsta.exe` is missing (as on some Windows 11
+  Home boxes), session discovery and `rdp_sessions()` fall back to the console user reported
+  by `Win32_ComputerSystem`, confirmed live by that user's `explorer.exe`, instead of
+  reporting no interactive session. Full editions keep the `qwinsta` path. (#3, thanks
+  @karas1999)
+
 ## [0.1.4] — 2026-08-10
 
 ### Fixed
