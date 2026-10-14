@@ -3,6 +3,19 @@
 All notable changes to winrdp-mcp are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses semantic versioning.
 
+## [0.1.8] — 2026-10-14
+
+### Changed
+- **FastMCP 4.x support** — relaxed the pin to `fastmcp>=2.11.0,<5` (was `<4`). The code now
+  works on both the 3.x and 4.x lines; the test suite runs green on 3.4.x and 4.1.x.
+- **Destructive-confirmation elicitation is version-robust.** `ctx.elicit` now passes an
+  explicit `response_type=bool` (FastMCP 4 requires it). On MCP 2026-07-28 *stateless*
+  connections (FastMCP 4's default) server-initiated elicitation is unavailable, so
+  `WINRDP_CONFIRM_DESTRUCTIVE=1` safely falls back to the client's `destructiveHint` gating
+  instead of erroring — the call proceeds rather than breaking.
+- CI workflow actions bumped to the Node-24 majors (checkout v7, setup-python v7,
+  upload-artifact v7, download-artifact v8).
+
 ## [0.1.7] — 2026-10-14
 
 ### Fixed

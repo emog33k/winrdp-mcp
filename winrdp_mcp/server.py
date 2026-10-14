@@ -154,14 +154,21 @@ def _install_confirm_middleware(mcp: FastMCP, destructive: set[str]) -> None:
                 args = getattr(context.message, "arguments", None) or {}
                 target = args.get("host") or "the active host"
                 try:
+                    # response_type=bool: a yes/no confirmation. (FastMCP 4 requires an
+                    # explicit response_type; 3.x accepts bool too, so this works on both.)
                     result = await fctx.elicit(
                         f"Confirm destructive operation '{name}' on {target}? "
                         "This can delete data, cut access, or reboot the box.",
+                        response_type=bool,
                     )
                 except Exception:  # noqa: BLE001 — client can't elicit; defer to client gating
                     result = None
-                if result is not None and not isinstance(result, AcceptedElicitation):
-                    raise ToolError(f"'{name}' cancelled by operator (confirmation declined).")
+                # Proceed only on an explicit accept with True; decline/cancel/False -> block.
+                if result is not None:
+                    confirmed = (isinstance(result, AcceptedElicitation)
+                                 and getattr(result, "data", None) is True)
+                    if not confirmed:
+                        raise ToolError(f"'{name}' cancelled by operator (confirmation declined).")
             return await call_next(context)
 
     mcp.add_middleware(ConfirmDestructive())
