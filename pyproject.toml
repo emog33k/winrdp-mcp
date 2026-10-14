@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "winrdp-mcp"
-version = "0.1.7"
+version = "0.1.8"
 description = "Zero-config MCP server to provision and fully administer any Windows RDP box (Win10/11/Server) — built for Claude & Claude Code."
 readme = "README.md"
 license = "MIT"
@@ -34,7 +34,7 @@ classifiers = [
 
 # Core deps: controller mode needs nothing on the target box beyond WinRM/SSH/SMB.
 dependencies = [
-    "fastmcp>=2.11.0,<4",
+    "fastmcp>=2.11.0,<5",
     "pywinrm>=0.4.3",
     "requests>=2.31.0",
     "requests-ntlm>=1.2.0",
