@@ -74,6 +74,11 @@ def setup(debug: bool | None = None) -> None:
     root.setLevel(level)
     root.addHandler(handler)
     root.propagate = False
+    # paramiko logs a full traceback to stderr on every failed SSH probe (a dead/closed port,
+    # a proxy that mangles the banner) — which is normal, expected flow for transport probing.
+    # Quiet it to CRITICAL unless we're debugging, so routine probes don't spew stack traces.
+    if level > logging.DEBUG:
+        logging.getLogger("paramiko").setLevel(logging.CRITICAL)
     _CONFIGURED = True
 
 

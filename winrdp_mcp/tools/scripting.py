@@ -13,6 +13,7 @@ from typing import Optional
 
 from .. import ps
 from ..config import REMOTE_TMP
+from ..progress import Context, Progress
 
 
 def _rid(ext: str) -> str:
@@ -72,14 +73,18 @@ def register(mcp, ctx) -> None:
         return run_python(code, host=host, args=args, pip=pip, elevated=elevated, timeout=timeout)
 
     @mcp.tool
-    def pip_install(packages: str, host: Optional[str] = None, timeout: int = 600) -> dict:
+    def pip_install(packages: str, host: Optional[str] = None, timeout: int = 600,
+                    mcp_ctx: Context | None = None) -> dict:
         """pip-install one or more packages on a box (comma/space separated)."""
+        prog = Progress(mcp_ctx, 100)
         t = ctx.transport_for(host)
         py = _find_python(t)
         if not py:
             return {"error": "Python not found; call ensure_runtime first"}
         pkgs = " ".join(p.strip() for p in packages.replace(",", " ").split() if p.strip())
+        prog.report(10, f"pip installing {pkgs} (can take a while)")
         r = t.run_ps(f"& {ps.ps_string(py)} -m pip install --disable-pip-version-check {pkgs}", timeout=timeout)
+        prog.report(100, "pip install finished")
         return {"python": py, "stdout": r.stdout[-4000:], "stderr": r.stderr[-1000:], "rc": r.rc}
 
     # ------------------------------------------------------------------ generic
@@ -134,15 +139,21 @@ def register(mcp, ctx) -> None:
         return run_script(code, interpreter="node", host=host, args=args, timeout=timeout)
 
     @mcp.tool
-    def ensure_runtime(runtime: str = "python", host: Optional[str] = None, timeout: int = 900) -> dict:
+    def ensure_runtime(runtime: str = "python", host: Optional[str] = None, timeout: int = 900,
+                       mcp_ctx: Context | None = None) -> dict:
         """Ensure a language runtime is installed on a box. runtime: python | node.
         Installs via winget (falls back to choco). Runs elevated."""
+        prog = Progress(mcp_ctx, 100)
         if runtime == "python":
             if _find_python(ctx.transport_for(host)):
                 return {"runtime": "python", "installed": True, "note": "already present"}
-            _install_python(ctx, host, timeout=timeout)
-            return {"runtime": "python", "installed": bool(_find_python(ctx.transport_for(host)))}
+            prog.report(10, "installing Python runtime (download + install, a few minutes)")
+            _install_python(ctx, host, timeout=timeout, progress=prog.heartbeat("installing Python"))
+            res = {"runtime": "python", "installed": bool(_find_python(ctx.transport_for(host)))}
+            prog.report(100, "Python runtime ready")
+            return res
         if runtime == "node":
+            prog.report(10, "installing Node.js runtime (download + install, a few minutes)")
             body = (
                 "if(Get-Command node -ErrorAction SilentlyContinue){$result=@{installed=$true;note='present'}}"
                 "elseif(Get-Command winget -ErrorAction SilentlyContinue){"
@@ -153,7 +164,9 @@ def register(mcp, ctx) -> None:
                 "$result=@{installed=((Get-Command node -ErrorAction SilentlyContinue)-ne $null)}}"
                 "else{$result=@{installed=$false;error='no package manager; call ensure_package_manager'}}"
             )
-            return ctx.exec_json(body, host=host, elevated=True, timeout=timeout)
+            out = ctx.exec_json(body, host=host, elevated=True, timeout=timeout)
+            prog.report(100, "Node runtime step finished")
+            return out
         return {"error": "runtime must be python|node"}
 
 
@@ -182,7 +195,7 @@ def _find_python(transport) -> Optional[str]:
     return p[-1] if p else None
 
 
-def _install_python(ctx, host, timeout: int = 1200) -> None:
+def _install_python(ctx, host, timeout: int = 1200, progress=None) -> None:
     # winget/choco/the .exe installer take minutes; run detached (scheduled task) + poll so
     # a mid-install WinRM disconnect on a small/busy box doesn't fail the install.
     body = (
@@ -195,7 +208,7 @@ def _install_python(ctx, host, timeout: int = 1200) -> None:
         "$f=Join-Path $env:TEMP 'py.exe';(New-Object Net.WebClient).DownloadFile($u,$f);"
         "Start-Process $f -ArgumentList '/quiet','InstallAllUsers=1','PrependPath=1' -Wait}"
     )
-    ctx.run_long(body, host=host, timeout=timeout)
+    ctx.run_long(body, host=host, timeout=timeout, progress=progress)
 
 
 def _guess_interpreter(content: str) -> str:

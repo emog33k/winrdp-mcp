@@ -2,9 +2,9 @@
   "dxt_version": "0.1",
   "name": "winrdp-mcp",
   "display_name": "Windows RDP Admin",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Provision and fully administer any Windows RDP box (Win10/11/Server) over WinRM/SSH/SMB.",
-  "long_description": "Zero-config MCP server that brings a Windows box under management with one call and then exposes 144 tools to run it: elevated PowerShell/Python, files and fast transfer, RDP control, desktop/GUI automation, networking, scheduling, and security ops. Built for Claude and Claude Code.",
+  "long_description": "Zero-config MCP server that brings a Windows box under management with one call and then exposes 147 tools to run it: elevated PowerShell/Python, files and fast transfer, RDP control, desktop/GUI automation, networking, scheduling, and security ops. Built for Claude and Claude Code.",
   "author": {
     "name": "Sol",
     "url": "https://github.com/emog33k/winrdp-mcp"
@@ -31,7 +31,7 @@
     "profile": {
       "type": "string",
       "title": "Tool profile",
-      "description": "Which tool set to expose: full (144 tools), admin, rdp, or core.",
+      "description": "Which tool set to expose: full (147 tools), dynamic (lean start + load-on-demand), admin, rdp, or core.",
       "default": "full",
       "required": false
     },

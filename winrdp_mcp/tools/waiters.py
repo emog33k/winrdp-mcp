@@ -11,13 +11,17 @@ import time
 from typing import Optional
 
 from .. import ps
+from ..progress import Context, Progress
 
 
 def register(mcp, ctx) -> None:
-    def _poll(check, want, host, timeout, interval, extra=None):
+    def _poll(check, want, host, timeout, interval, extra=None, prog=None):
         start = time.time()
         deadline = start + timeout
         last_error = None
+        p = prog if prog is not None else Progress()
+        label = (extra or {}).get("service") or (extra or {}).get("process") \
+            or (extra or {}).get("path") or (extra or {}).get("target") or "condition"
         while True:
             try:
                 cur = check()
@@ -29,9 +33,17 @@ def register(mcp, ctx) -> None:
                 if cur.get("_match") == want:
                     out = {"reached": True, "waited_s": round(time.time() - start, 1)}
                     out.update({k: v for k, v in cur.items() if not k.startswith("_")})
+                    p.report(timeout, f"{label} reached", total=timeout)
                     return out
                 if cur.get("_error"):
                     last_error = cur["_error"]
+            elapsed = time.time() - start
+            state = ""
+            if isinstance(cur, dict):
+                state = next((f" ({k}={v})" for k, v in cur.items()
+                              if not k.startswith("_")), "")
+            p.report(min(elapsed, timeout), f"waiting for {label}{state} — {int(elapsed)}s/{timeout}s",
+                     total=timeout)
             if time.time() >= deadline:
                 # Surface the last error so a timeout that was really an auth/connection
                 # failure isn't reported as a bland "not reached".
@@ -44,7 +56,8 @@ def register(mcp, ctx) -> None:
 
     @mcp.tool
     def wait_for_port(target: str, port: int, host: Optional[str] = None, state: str = "open",
-                      timeout: int = 120, interval: int = 3) -> dict:
+                      timeout: int = 120, interval: int = 3,
+                      mcp_ctx: Context | None = None) -> dict:
         """Wait until a TCP `port` on `target` is reachable *from the box*. state: open | closed."""
         want = state == "open"
 
@@ -54,11 +67,12 @@ def register(mcp, ctx) -> None:
                 "$result=@{o=[bool]$t.TcpTestSucceeded}", host=host, timeout=30)
             return {"_match": bool(r.get("o")) == want, "open": bool(r.get("o"))}
 
-        return _poll(check, True, host, timeout, interval, {"target": target, "port": port, "state": state})
+        return _poll(check, True, host, timeout, interval, {"target": target, "port": port, "state": state}, Progress(mcp_ctx, timeout))
 
     @mcp.tool
     def wait_for_service(name: str, host: Optional[str] = None, status: str = "Running",
-                         timeout: int = 120, interval: int = 3) -> dict:
+                         timeout: int = 120, interval: int = 3,
+                      mcp_ctx: Context | None = None) -> dict:
         """Wait until a service reaches a status. status: Running | Stopped | Paused."""
         def check():
             r = ctx.exec_json(
@@ -67,11 +81,12 @@ def register(mcp, ctx) -> None:
             st = r.get("st")
             return {"_match": st == status, "status": st}
 
-        return _poll(check, True, host, timeout, interval, {"service": name, "want": status})
+        return _poll(check, True, host, timeout, interval, {"service": name, "want": status}, Progress(mcp_ctx, timeout))
 
     @mcp.tool
     def wait_for_process(name: str, host: Optional[str] = None, present: bool = True,
-                         timeout: int = 120, interval: int = 3) -> dict:
+                         timeout: int = 120, interval: int = 3,
+                      mcp_ctx: Context | None = None) -> dict:
         """Wait until a process is present (present=True) or gone (present=False)."""
         def check():
             r = ctx.exec_json(
@@ -80,11 +95,12 @@ def register(mcp, ctx) -> None:
             here = int(r.get("n", 0)) > 0
             return {"_match": here == present, "count": int(r.get("n", 0))}
 
-        return _poll(check, True, host, timeout, interval, {"process": name, "present": present})
+        return _poll(check, True, host, timeout, interval, {"process": name, "present": present}, Progress(mcp_ctx, timeout))
 
     @mcp.tool
     def wait_for_file(path: str, host: Optional[str] = None, exists: bool = True,
-                      timeout: int = 120, interval: int = 3) -> dict:
+                      timeout: int = 120, interval: int = 3,
+                      mcp_ctx: Context | None = None) -> dict:
         """Wait until a file/directory exists (exists=True) or disappears (exists=False)."""
         def check():
             r = ctx.exec_json(
@@ -92,4 +108,4 @@ def register(mcp, ctx) -> None:
             here = bool(r.get("e"))
             return {"_match": here == exists, "exists": here}
 
-        return _poll(check, True, host, timeout, interval, {"path": path, "exists": exists})
+        return _poll(check, True, host, timeout, interval, {"path": path, "exists": exists}, Progress(mcp_ctx, timeout))

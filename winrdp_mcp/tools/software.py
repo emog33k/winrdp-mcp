@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Optional
 
 from .. import ps
+from ..progress import Context, Progress
 from . import _validate as V
 
 
@@ -17,6 +18,7 @@ def register(mcp, ctx) -> None:
         manager: str = "auto",
         silent_args: str = "/S",
         timeout: int = 1200,
+        mcp_ctx: Context | None = None,
     ) -> dict:
         """Install a program on a box.
 
@@ -26,7 +28,9 @@ def register(mcp, ctx) -> None:
         silently (MSI uses /qn; EXE uses silent_args). Installs run detached (scheduled
         task) so a mid-install WinRM disconnect on a small/busy box doesn't fail them.
         """
+        p = Progress(mcp_ctx, 100)
         if url:
+            p.report(10, f"downloading and running installer from {url}")
             body = (
                 f"$u={ps.ps_string(url)};$f=Join-Path $env:TEMP ([IO.Path]::GetFileName($u.Split('?')[0]));"
                 "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12;"
@@ -35,7 +39,9 @@ def register(mcp, ctx) -> None:
                 "Start-Process msiexec -ArgumentList '/i',\"`\"$f`\"\",'/qn','/norestart' -Wait}"
                 f"else{{Start-Process $f -ArgumentList {ps.ps_string(silent_args)} -Wait}}"
             )
-            r = ctx.run_long(body, host=host, timeout=timeout)
+            r = ctx.run_long(body, host=host, timeout=timeout,
+                             progress=p.heartbeat("running installer"))
+            p.report(100, "installer finished")
             return {"installer_url": url, "stdout": r.stdout[-2000:], "stderr": r.stderr[-1000:], "rc": r.rc}
 
         if not name:
@@ -57,7 +63,10 @@ def register(mcp, ctx) -> None:
             cmd = f"choco install {name} -y --no-progress"
         else:
             return {"error": "no package manager found; call ensure_package_manager first or pass url"}
-        r = ctx.run_long(cmd, host=host, timeout=timeout)
+        p.report(15, f"installing {name} via {mgr} (this can take a few minutes)")
+        r = ctx.run_long(cmd, host=host, timeout=timeout,
+                         progress=p.heartbeat(f"installing {name} via {mgr}"))
+        p.report(100, f"{name} install finished")
         return {"manager": mgr, "stdout": r.stdout[-4000:], "stderr": r.stderr[-1000:], "rc": r.rc}
 
     @mcp.tool
@@ -86,24 +95,28 @@ def register(mcp, ctx) -> None:
         return ctx.exec_json(body, host=host, elevated=True, timeout=timeout)
 
     @mcp.tool
-    def list_installed_software(host: Optional[str] = None, filter: Optional[str] = None) -> list:
-        """List installed programs (from the uninstall registry, 32/64-bit + per-user)."""
+    def list_installed_software(host: Optional[str] = None, filter: Optional[str] = None,
+                                limit: int = 500) -> list:
+        """List installed programs (from the uninstall registry, 32/64-bit + per-user).
+        Capped at `limit` entries."""
         where = f"|Where-Object{{$_.DisplayName -like {ps.ps_string('*' + filter + '*')}}}" if filter else ""
         body = (
             "$keys='HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*',"
             "'HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*',"
             "'HKCU:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*';"
             f"$result=@(Get-ItemProperty $keys -ErrorAction SilentlyContinue|"
-            f"Where-Object{{$_.DisplayName}}{where}|Sort-Object DisplayName -Unique|ForEach-Object{{@{{"
+            f"Where-Object{{$_.DisplayName}}{where}|Sort-Object DisplayName -Unique|"
+            f"Select-Object -First {int(limit)}|ForEach-Object{{@{{"
             "name=$_.DisplayName;version=$_.DisplayVersion;publisher=$_.Publisher}})"
         )
         return ps.as_list(ctx.exec_json(body, host=host))
 
     @mcp.tool
     def ensure_package_manager(host: Optional[str] = None, manager: str = "choco",
-                               timeout: int = 600) -> dict:
+                               timeout: int = 600, mcp_ctx: Context | None = None) -> dict:
         """Install a package manager on a box. manager: 'choco' (Chocolatey) or 'winget'
         (installs the App Installer if missing). Runs elevated."""
+        prog = Progress(mcp_ctx, 100)
         if manager == "choco":
             script = (
                 "Set-ExecutionPolicy Bypass -Scope Process -Force;"
@@ -120,4 +133,8 @@ def register(mcp, ctx) -> None:
             )
         else:
             return {"error": "manager must be 'choco' or 'winget'"}
-        return ctx.exec_json(script, host=host, elevated=True, timeout=timeout)
+        prog.report(15, f"installing {manager} (download + setup)")
+        out = ctx.exec_json(script, host=host, elevated=True, timeout=timeout,
+                            progress=prog.heartbeat(f"installing {manager}"))
+        prog.report(100, f"{manager} install finished")
+        return out
