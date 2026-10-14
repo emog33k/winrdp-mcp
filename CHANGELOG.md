@@ -3,7 +3,11 @@
 All notable changes to winrdp-mcp are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses semantic versioning.
 
-## [Unreleased]
+## [0.1.6] — 2026-10-14
+
+MCP 2026-spec alignment (dynamic discovery, structured output, progress, elicitation),
+provisioning reliability fixes, and file-transfer/ops improvements. **147 tools, 6 prompts,
+3 resources.** No tool signatures removed.
 
 ### Fixed
 - **`download_file` now survives slow/large downloads.** It ran the fetch in a single WinRM
