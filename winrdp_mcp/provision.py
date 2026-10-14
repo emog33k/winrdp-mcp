@@ -250,19 +250,33 @@ def bootstrap_oneliner(h: Host, basic: bool = False) -> str:
 
 def _ensure_fast_transfer(h: Host, transport: Transport, rep: ProvisionReport) -> None:
     """Guarantee a fast file channel exists. SMB (ADMIN$) needs no install and is preferred;
-    only when 445 is blocked do we install OpenSSH so uploads can use SFTP instead of the
-    slow chunked-base64-over-WinRM path."""
-    if rep.reachable_ports.get("smb"):
-        rep.actions.append("fast-transfer=SMB (admin share, no install)")
+    only when it isn't usable do we install OpenSSH so uploads can use SFTP instead of the
+    slow chunked-base64-over-WinRM path.
+
+    The channel is VERIFIED by an actual probe (not the port scan): a proxy/VPN on the
+    operator side can make 445/22 look open while SMB/SSH don't actually work through it (only
+    HTTP WinRM does), so trusting the scan here would falsely claim a fast channel that uploads
+    then can't use."""
+    probe = getattr(transport, "_fast_channel", None)
+    ch = probe() if probe else None
+    if ch:
+        rep.actions.append(f"fast-transfer={ch[0].upper()} (verified)")
         return
-    if port_open(h.host, config.SSH_PORT):
-        rep.actions.append("fast-transfer=SFTP (SSH already up)")
-        return
+    # No working fast channel. Install OpenSSH and re-probe (pointless behind a proxy that
+    # blocks 22, but honest — we report chunked if SFTP still isn't reachable).
     try:
         r = transport.run_ps(ENABLE_SSH_PS, timeout=300)
         if "WINRDP_SSH_ENABLED" in r.stdout:
             rep.ssh_enabled = True
-            rep.actions.append("fast-transfer=SFTP (installed OpenSSH for fast uploads)")
+            drop = getattr(transport, "_drop_fast_channel", None)
+            if drop:
+                drop()  # forget the cached 'no channel' so the re-probe is fresh
+            ch = probe() if probe else None
+            if ch:
+                rep.actions.append(f"fast-transfer={ch[0].upper()} (installed OpenSSH)")
+                return
+            rep.actions.append("fast-transfer=chunked (SMB/SFTP not reachable — e.g. blocked by "
+                               "an operator-side proxy/VPN; uploads use base64 over WinRM)")
         else:
             rep.actions.append("fast-transfer=chunked (OpenSSH install unconfirmed)")
     except Exception as e:  # noqa: BLE001

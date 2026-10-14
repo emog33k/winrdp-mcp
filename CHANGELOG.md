@@ -3,6 +3,18 @@
 All notable changes to winrdp-mcp are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses semantic versioning.
 
+## [0.1.9] — 2026-10-14
+
+### Fixed
+- **Honest fast-transfer detection.** `provision_host` reported `fast-transfer=SMB` based on
+  the (proxy-foolable) port scan, so behind an operator-side proxy/VPN that doesn't tunnel
+  SMB/SSH it claimed a fast channel that `file_upload` then couldn't use (silently falling
+  back to slow chunked base64 over WinRM). It now VERIFIES the channel with a real probe and
+  reports `fast-transfer=SMB/SFTP (verified)` or `fast-transfer=chunked (SMB/SFTP not
+  reachable — blocked by proxy/VPN)`, so you can see why an upload is slow. (For fast uploads
+  behind such a proxy, route the box IPs DIRECT so SMB/SFTP work, or use `download_file` to
+  fetch straight onto the box.)
+
 ## [0.1.8] — 2026-10-14
 
 ### Changed
