@@ -8,6 +8,7 @@ from typing import Optional
 
 from .. import ps
 from ..config import REMOTE_TOOLS
+from ..progress import Context, Progress
 from . import _validate as V
 
 _NSSM_URL = "https://nssm.cc/release/nssm-2.24.zip"
@@ -40,6 +41,31 @@ def register(mcp, ctx) -> None:
                 "stderr": r.stderr, "rc": r.rc}
 
     @mcp.tool
+    def task_stop(name: str, host: Optional[str] = None, unregister: bool = True) -> dict:
+        """Stop a running scheduled task by name and kill its process tree — the clean way to
+        cancel a detached job (the `task` returned by run_powershell(detach=True) /
+        start_process). Also kills any powershell/child processes the task spawned from its
+        staged script, then (by default) unregisters the task. Returns what it stopped."""
+        V.obj_name(name, "name")
+        # The detached wrapper runs `powershell -File <REMOTE_TMP>\<task>.ps1`; find any live
+        # process whose command line references that script (the task's own tree) and kill it.
+        from ..config import REMOTE_TMP
+        script_marker = f"{REMOTE_TMP}\\{name}"
+        body = (
+            f"$n={ps.ps_string(name)};$marker={ps.ps_string(script_marker)};"
+            "$killed=@();"
+            "try{Stop-ScheduledTask -TaskName $n -ErrorAction SilentlyContinue}catch{};"
+            # kill processes spawned from the task's staged script (and their children, /T)
+            "try{$procs=@(Get-CimInstance Win32_Process -Filter \"CommandLine LIKE '%$marker%'\" "
+            "-ErrorAction SilentlyContinue);foreach($p in $procs){"
+            "try{& taskkill /PID $($p.ProcessId) /T /F 2>$null|Out-Null;$killed+=$p.ProcessId}catch{}}}catch{};"
+            + ("try{Unregister-ScheduledTask -TaskName $n -Confirm:$false -ErrorAction SilentlyContinue}catch{};"
+               if unregister else "")
+            + "$result=@{task=$n;killed_pids=$killed;unregistered=" + ("$true" if unregister else "$false") + "}"
+        )
+        return ctx.exec_json(body, host=host, elevated=True, timeout=60)
+
+    @mcp.tool
     def run_at_startup(name: str, command: str, host: Optional[str] = None,
                        at: str = "boot", run_as: str = "SYSTEM", highest: bool = True) -> dict:
         """Register a command to run automatically at boot or logon (scheduled task).
@@ -55,7 +81,8 @@ def register(mcp, ctx) -> None:
     @mcp.tool
     def persist_as_service(name: str, command: str, host: Optional[str] = None,
                            display_name: Optional[str] = None, autostart: bool = True,
-                           start_now: bool = True, timeout: int = 300) -> dict:
+                           start_now: bool = True, timeout: int = 300,
+                           mcp_ctx: Context | None = None) -> dict:
         """Install a command as a resilient auto-restarting Windows service via NSSM.
 
         Unlike a scheduled task, this keeps the command running and restarts it if it exits.
@@ -63,6 +90,8 @@ def register(mcp, ctx) -> None:
         any command line works. Runs elevated.
         """
         V.obj_name(name, "name")
+        prog = Progress(mcp_ctx, 100)
+        prog.report(15, f"installing service '{name}' via NSSM (downloads NSSM on first use)")
         disp = display_name or name
         start_type = "SERVICE_AUTO_START" if autostart else "SERVICE_DEMAND_START"
         body = (
@@ -88,7 +117,10 @@ def register(mcp, ctx) -> None:
             "$result=@{ok=$true;service=$svc;status=if($s){$s.Status.ToString()}else{'unknown'};"
             "start=" + ("'auto'" if autostart else "'demand'") + "}"
         )
-        return ctx.exec_json(body, host=host, elevated=True, timeout=timeout)
+        out = ctx.run_long_json(body, host=host, timeout=timeout,
+                                progress=prog.heartbeat(f"installing service {name}"))
+        prog.report(100, f"service '{name}' installed")
+        return out
 
     @mcp.tool
     def unpersist_service(name: str, host: Optional[str] = None) -> dict:

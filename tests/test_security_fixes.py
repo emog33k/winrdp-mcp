@@ -108,6 +108,28 @@ def test_enable_script_omits_weakening_settings():
     assert "LocalAccountTokenFilterPolicy" in ENABLE_WINRM_PS  # the necessary one stays
 
 
+def test_enable_script_does_not_drop_rdp():
+    """The enable script must not switch the network profile (that re-applies per-profile
+    firewall rules and drops the live RDP session), and must keep RDP allowed defensively."""
+    from winrdp_mcp.provision import ENABLE_WINRM_PS
+
+    assert "Set-NetConnectionProfile" not in ENABLE_WINRM_PS
+    assert "fDenyTSConnections" in ENABLE_WINRM_PS        # RDP kept enabled
+    assert "'Remote Desktop'" in ENABLE_WINRM_PS          # RDP firewall group kept on
+    assert "-SkipNetworkProfileCheck" in ENABLE_WINRM_PS  # how WinRM still comes up on Public
+
+
+def test_basic_auth_is_opt_in():
+    """Basic/AllowUnencrypted must NEVER be in the default script, only via enable basic=True."""
+    from winrdp_mcp.provision import ENABLE_WINRM_PS, enable_winrm_script
+
+    assert "Basic" not in ENABLE_WINRM_PS and "AllowUnencrypted" not in ENABLE_WINRM_PS
+    assert enable_winrm_script(False) == ENABLE_WINRM_PS  # default = no Basic
+    opted = enable_winrm_script(True)
+    assert "WINRDP_BASIC_ENABLED" in opted
+    assert "AllowUnencryptedTraffic" in opted  # set via policy key, survives Public profile
+
+
 # --- #5 secrets never inlined into the script -------------------------------
 class _FakeTransport:
     def __init__(self):
@@ -165,3 +187,17 @@ def test_kdf_scrypt_salted_and_multifernet_decrypts_legacy():
     assert isinstance(f, MultiFernet)  # passphrase path builds a MultiFernet
     legacy_ct = Fernet(legacy_key).encrypt(b"old-inventory-data")
     assert f.decrypt(legacy_ct) == b"old-inventory-data"  # old ciphertext still decrypts
+
+
+def test_harden_script_never_restarts_winrm():
+    """The harden step runs OVER the WinRM session, so it must never restart/reconfigure the
+    WinRM service (that would drop its own connection)."""
+    from winrdp_mcp.provision import HARDEN_PS
+    for bad in ["Enable-PSRemoting", "Restart-Service", "Stop-Service", "Set-Service",
+                "winrm set", "winrm quickconfig"]:
+        assert bad not in HARDEN_PS, f"{bad} must not be in HARDEN_PS (runs over the WinRM session)"
+    assert "LocalAccountTokenFilterPolicy" in HARDEN_PS
+    assert "WINRDP_WINRM_HARDENED" in HARDEN_PS
+    # harden must not re-touch the WinRM firewall/listener either (can drop the live connection)
+    assert "Windows Remote Management" not in HARDEN_PS
+    assert "AllowUnencrypted" not in HARDEN_PS and "Basic" not in HARDEN_PS

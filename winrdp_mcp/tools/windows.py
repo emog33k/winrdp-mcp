@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Optional
 
 from .. import ps
+from ..progress import Context, Progress
 from . import _validate as V
 
 
@@ -35,7 +36,8 @@ def register(mcp, ctx) -> None:
     # ------------------------------------------------------------------ features / roles
     @mcp.tool
     def windows_features(action: str = "list", name: Optional[str] = None,
-                         host: Optional[str] = None, timeout: int = 900) -> dict:
+                         host: Optional[str] = None, timeout: int = 900,
+                         mcp_ctx: Context | None = None) -> dict:
         """Manage Windows features/roles. action: list | install | remove.
 
         Auto-detects Server (Install-WindowsFeature) vs client (Enable/Disable optional
@@ -72,14 +74,20 @@ def register(mcp, ctx) -> None:
             )
         else:
             return {"error": "action must be list|install|remove"}
-        return ctx.exec_json(body, host=host, elevated=True, timeout=timeout)
+        prog = Progress(mcp_ctx, 100)
+        prog.report(15, f"{action} Windows feature '{name}' (can take minutes)")
+        out = ctx.run_long_json(body, host=host, timeout=timeout,
+                                progress=prog.heartbeat(f"{action} feature {name}"))
+        prog.report(100, f"feature {action} finished")
+        return out
 
     # ------------------------------------------------------------------ Windows Update
     @mcp.tool
     def windows_update(action: str = "check", host: Optional[str] = None,
-                       timeout: int = 1800) -> dict:
+                       timeout: int = 1800, mcp_ctx: Context | None = None) -> dict:
         """Windows Update via the built-in COM API (no extra module needed).
         action: check (list pending) | install (download+install all)."""
+        p = Progress(mcp_ctx, 100)
         search = (
             "$s=New-Object -ComObject Microsoft.Update.Session;"
             "$u=$s.CreateUpdateSearcher();"
@@ -93,6 +101,7 @@ def register(mcp, ctx) -> None:
             )
             return {"pending": ps.as_list(ctx.exec_json(body, host=host, elevated=True, timeout=timeout))}
         if action == "install":
+            p.report(10, "searching, downloading and installing Windows updates (can take many minutes)")
             body = (
                 search +
                 "$col=New-Object -ComObject Microsoft.Update.UpdateColl;"
@@ -103,7 +112,10 @@ def register(mcp, ctx) -> None:
                 "$result=@{installed=$col.Count;result_code=$res.ResultCode;"
                 "reboot_required=$res.RebootRequired}}"
             )
-            return ctx.exec_json(body, host=host, elevated=True, timeout=timeout)
+            out = ctx.run_long_json(body, host=host, timeout=timeout,
+                                    progress=p.heartbeat("installing Windows updates"))
+            p.report(100, "Windows Update finished")
+            return out
         return {"error": "action must be check|install"}
 
     @mcp.tool
@@ -147,11 +159,16 @@ def register(mcp, ctx) -> None:
 
     @mcp.tool
     def defender_scan(host: Optional[str] = None, scan_type: str = "QuickScan",
-                      timeout: int = 1800) -> dict:
+                      timeout: int = 1800, mcp_ctx: Context | None = None) -> dict:
         """Run a Defender scan. scan_type: QuickScan | FullScan. Runs elevated."""
         V.enum(scan_type, {"QuickScan", "FullScan"}, "scan_type")
+        prog = Progress(mcp_ctx, 100)
+        prog.report(10, f"running Defender {scan_type} (FullScan can take a long time)")
         body = f"Start-MpScan -ScanType {scan_type};$result=@{{started=$true;scan_type='{scan_type}'}}"
-        return ctx.exec_json(body, host=host, elevated=True, timeout=timeout)
+        out = ctx.run_long_json(body, host=host, timeout=timeout,
+                                progress=prog.heartbeat(f"Defender {scan_type}"))
+        prog.report(100, f"Defender {scan_type} finished")
+        return out
 
     # ------------------------------------------------------------------ environment
     @mcp.tool

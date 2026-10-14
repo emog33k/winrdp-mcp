@@ -137,8 +137,11 @@ class Transport:
     def run_cmd(self, command: str, timeout: int = 120) -> ExecResult:  # pragma: no cover
         raise NotImplementedError
 
-    def upload(self, data: bytes, remote_path: str, timeout: int = 300) -> None:
-        """Default upload: stream base64 chunks through PowerShell (works everywhere)."""
+    def upload(self, data: bytes, remote_path: str, timeout: int = 300, progress=None) -> None:
+        """Default upload: stream base64 chunks through PowerShell (works everywhere).
+
+        ``progress`` (optional ``callable(done_bytes, total_bytes)``) is called as chunks are
+        written, so a caller can surface upload percentage on the slow chunked path."""
         self.run_ps(
             f"$p={ps.ps_string(remote_path)};"
             "$d=Split-Path $p -Parent;"
@@ -163,7 +166,9 @@ class Transport:
             f"if(Test-Path {ps.ps_string(tmp)}){{Remove-Item -LiteralPath {ps.ps_string(tmp)} -Force}}",
             idempotent=False,
         ).raise_for_status()
-        for i in range(0, len(b64), _CHUNK):
+        total = len(data)
+        n_b64 = len(b64)
+        for i in range(0, n_b64, _CHUNK):
             chunk = b64[i:i + _CHUNK]
             # [IO.File]::AppendAllText opens→appends→closes the file atomically per call — no
             # lingering stream handle (Add-Content could fail "Stream was not readable" when a
@@ -175,6 +180,13 @@ class Transport:
                 f"[IO.File]::AppendAllText({ps.ps_string(tmp)},{ps.ps_string(chunk)},[Text.Encoding]::ASCII)",
                 timeout=timeout, idempotent=False,
             ).raise_for_status("write chunk")
+            if progress is not None:
+                # scale base64 offset back to original-byte progress (gzip/b64 ratio is fixed)
+                done = min(total, int((i + len(chunk)) / n_b64 * total))
+                try:
+                    progress(done, total)
+                except Exception:  # noqa: BLE001 — progress must never break the upload
+                    pass
         # decode base64 → gunzip → write the file, all on the box.
         self.run_ps(
             f"$c=[Convert]::FromBase64String((Get-Content -LiteralPath {ps.ps_string(tmp)} -Raw));"
@@ -427,18 +439,23 @@ class WinRMTransport(Transport):
             except Exception:  # noqa: BLE001
                 pass
 
-    def upload(self, data: bytes, remote_path: str, timeout: int = 300) -> None:
+    def upload(self, data: bytes, remote_path: str, timeout: int = 300, progress=None) -> None:
         with self._oplock:
             ch = self._fast_channel()
             if ch:
                 kind, obj = ch
                 try:
                     obj.write(data, remote_path) if kind == "smb" else obj.upload(data, remote_path, timeout)
+                    if progress is not None:
+                        try:  # fast channel moves the file in one shot — report completion
+                            progress(len(data), len(data))
+                        except Exception:  # noqa: BLE001
+                            pass
                     return
                 except Exception as e:  # noqa: BLE001
                     _log.debug("winrm %s: fast upload failed (%s); chunked fallback", self.host, e)
                     self._drop_fast_channel()
-            super().upload(data, remote_path, timeout=timeout)
+            super().upload(data, remote_path, timeout=timeout, progress=progress)
 
     def download(self, remote_path: str, timeout: int = 300) -> bytes:
         with self._oplock:
@@ -542,7 +559,7 @@ class SSHTransport(Transport):
             rc = stdout.channel.recv_exit_status()
         return ExecResult(out, err, rc)
 
-    def upload(self, data: bytes, remote_path: str, timeout: int = 300) -> None:
+    def upload(self, data: bytes, remote_path: str, timeout: int = 300, progress=None) -> None:
         # Ensure parent dir, then SFTP the bytes — far faster than base64 chunking.
         self.run_ps(
             f"$d=Split-Path {ps.ps_string(remote_path)} -Parent;"
@@ -554,6 +571,11 @@ class SSHTransport(Transport):
                 sftp.putfo(io.BytesIO(data), remote_path.replace("\\", "/"))
             finally:
                 sftp.close()
+        if progress is not None:
+            try:
+                progress(len(data), len(data))
+            except Exception:  # noqa: BLE001
+                pass
 
     def download(self, remote_path: str, timeout: int = 300) -> bytes:
         with self._oplock:
@@ -640,10 +662,15 @@ class LocalTransport(Transport):
             proc.returncode,
         )
 
-    def upload(self, data: bytes, remote_path: str, timeout: int = 300) -> None:
+    def upload(self, data: bytes, remote_path: str, timeout: int = 300, progress=None) -> None:
         os.makedirs(os.path.dirname(remote_path) or ".", exist_ok=True)
         with open(remote_path, "wb") as f:
             f.write(data)
+        if progress is not None:
+            try:
+                progress(len(data), len(data))
+            except Exception:  # noqa: BLE001
+                pass
 
     def download(self, remote_path: str, timeout: int = 300) -> bytes:
         with open(remote_path, "rb") as f:

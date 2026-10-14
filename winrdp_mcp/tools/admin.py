@@ -8,6 +8,7 @@ from typing import Optional
 
 from .. import ps
 from ..config import REMOTE_TMP
+from ..models import ExecResult
 from . import _validate as V
 
 
@@ -66,15 +67,16 @@ def register(mcp, ctx) -> None:
 
     # ------------------------------------------------------------------ services
     @mcp.tool
-    def list_services(host: Optional[str] = None, filter: Optional[str] = None) -> list:
-        """List Windows services (name, display name, status, start mode)."""
+    def list_services(host: Optional[str] = None, filter: Optional[str] = None,
+                      limit: int = 500) -> list:
+        """List Windows services (name, display name, status, start mode). Capped at `limit`."""
         if filter:
             pat = ps.ps_string(f"*{filter}*")
             where = f"|Where-Object{{$_.Name -like {pat} -or $_.DisplayName -like {pat}}}"
         else:
             where = ""
         body = (
-            f"$result=@(Get-Service{where}|ForEach-Object{{@{{"
+            f"$result=@(Get-Service{where}|Select-Object -First {int(limit)}|ForEach-Object{{@{{"
             "name=$_.Name;display=$_.DisplayName;status=$_.Status.ToString();"
             "start=(Get-Service $_.Name).StartType.ToString()}})"
         )
@@ -335,7 +337,7 @@ def register(mcp, ctx) -> None:
         return ctx.exec_json(";".join(lines), host=host, elevated=True, timeout=60, secrets=secrets)
 
     @mcp.tool
-    def service_delete(name: str, host: Optional[str] = None) -> dict:
+    def service_delete(name: str, host: Optional[str] = None) -> ExecResult:
         """Delete a Windows service. Runs elevated."""
         r = ctx.exec_ps(f"& sc.exe delete {ps.ps_string(name)}", host=host, elevated=True, timeout=60)
         return {"stdout": r.stdout, "stderr": r.stderr, "rc": r.rc}

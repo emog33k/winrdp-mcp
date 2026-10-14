@@ -10,15 +10,19 @@ from typing import Optional
 
 from .. import ps
 from ..config import REMOTE_TMP
+from ..models import ExecResult
+from ..progress import Context, Progress
 from . import _validate as V
 
 
 def register(mcp, ctx) -> None:
     @mcp.tool
-    def file_list(path: str, host: Optional[str] = None) -> list:
-        """List a directory on a box (files and folders with size and mtime)."""
+    def file_list(path: str, host: Optional[str] = None, limit: int = 1000) -> list:
+        """List a directory on a box (files and folders with size and mtime). Capped at
+        `limit` entries so a huge directory can't flood the context."""
         body = (
-            f"$result=@(Get-ChildItem -LiteralPath {ps.ps_string(path)} -Force|ForEach-Object{{@{{"
+            f"$result=@(Get-ChildItem -LiteralPath {ps.ps_string(path)} -Force|"
+            f"Select-Object -First {int(limit)}|ForEach-Object{{@{{"
             "name=$_.Name;is_dir=$_.PSIsContainer;"
             "size=if($_.PSIsContainer){0}else{$_.Length};"
             "modified=$_.LastWriteTimeUtc.ToString('o');"
@@ -81,12 +85,20 @@ def register(mcp, ctx) -> None:
         return ps.as_list(ctx.exec_json(body, host=host, timeout=180))
 
     @mcp.tool
-    def file_upload(local_path: str, remote_path: str, host: Optional[str] = None) -> dict:
-        """Upload a file from the operator machine to a box."""
+    def file_upload(local_path: str, remote_path: str, host: Optional[str] = None,
+                    mcp_ctx: Context | None = None) -> dict:
+        """Upload a file from the operator machine to a box. Uses the fast SMB/SFTP channel
+        when available (one shot); otherwise streams chunked over WinRM and reports progress."""
         with open(local_path, "rb") as f:
             data = f.read()
-        ctx.transport_for(host).upload(data, remote_path)
-        return {"ok": True, "remote_path": remote_path, "bytes": len(data)}
+        total = len(data)
+        p = Progress(mcp_ctx, total)
+        p.report(0, f"uploading {os.path.basename(local_path)} ({total} bytes)")
+        ctx.transport_for(host).upload(
+            data, remote_path,
+            progress=lambda done, tot: p.report(done, f"uploaded {done}/{tot} bytes", total=tot),
+        )
+        return {"ok": True, "remote_path": remote_path, "bytes": total}
 
     @mcp.tool
     def file_download(remote_path: str, local_path: str, host: Optional[str] = None) -> dict:
@@ -175,7 +187,7 @@ def register(mcp, ctx) -> None:
 
     @mcp.tool
     def grant_acl(path: str, principal: str, rights: str = "FullControl",
-                  host: Optional[str] = None, recurse: bool = False) -> dict:
+                  host: Optional[str] = None, recurse: bool = False) -> ExecResult:
         """Grant a principal rights on a path via icacls. rights: F|M|RX|R|W or a word like
         FullControl->F. Runs elevated. Use take_own first if access is denied."""
         rmap = {"fullcontrol": "F", "modify": "M", "read": "R", "readexecute": "RX", "write": "W"}
@@ -188,7 +200,7 @@ def register(mcp, ctx) -> None:
         return {"stdout": r.stdout, "stderr": r.stderr, "rc": r.rc}
 
     @mcp.tool
-    def take_own(path: str, host: Optional[str] = None, recurse: bool = False) -> dict:
+    def take_own(path: str, host: Optional[str] = None, recurse: bool = False) -> ExecResult:
         """Take ownership of a file/folder via takeown (needed before changing a locked
         ACL). Runs elevated."""
         rec = "/R /D Y " if recurse else ""
@@ -196,29 +208,56 @@ def register(mcp, ctx) -> None:
         return {"stdout": r.stdout, "stderr": r.stderr, "rc": r.rc}
 
     @mcp.tool
-    def download_file(url: str, dest: str, host: Optional[str] = None, timeout: int = 600) -> dict:
-        """Download a URL directly onto a box (server-side, TLS 1.2). Returns size + SHA-256."""
+    def download_file(url: str, dest: str, host: Optional[str] = None, timeout: int = 600,
+                      mcp_ctx: Context | None = None) -> dict:
+        """Download a URL directly onto a box (server-side) and save it to `dest`.
+
+        Runs the download in a detached SYSTEM task that is polled with short calls, so it
+        SURVIVES a slow/large transfer that would otherwise drop the WinRM session mid-way
+        (no single long-held request). TLS 1.2/1.3; tries WebClient, falls back to
+        Invoke-WebRequest. Returns {path, bytes, sha256} only once the file is complete.
+        """
+        p = Progress(mcp_ctx, 100)
+        p.report(5, f"downloading {url} on the box")
         body = (
-            "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12;"
-            f"$d=Split-Path {ps.ps_string(dest)} -Parent;"
+            "try{[Net.ServicePointManager]::SecurityProtocol="
+            "[Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13}catch{"
+            "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12};"
+            f"$u={ps.ps_string(url)};$dest={ps.ps_string(dest)};"
+            "$d=Split-Path $dest -Parent;"
             "if($d -and -not(Test-Path $d)){New-Item -ItemType Directory -Path $d -Force|Out-Null};"
-            f"(New-Object Net.WebClient).DownloadFile({ps.ps_string(url)},{ps.ps_string(dest)});"
-            f"$fi=Get-Item {ps.ps_string(dest)};"
+            "try{(New-Object Net.WebClient).DownloadFile($u,$dest)}"
+            "catch{Invoke-WebRequest -Uri $u -OutFile $dest -UseBasicParsing};"
+            "$fi=Get-Item -LiteralPath $dest;"
             "$result=@{path=$fi.FullName;bytes=$fi.Length;"
-            "sha256=(Get-FileHash $fi.FullName -Algorithm SHA256).Hash}"
+            "sha256=(Get-FileHash -LiteralPath $fi.FullName -Algorithm SHA256).Hash}"
         )
-        return ctx.exec_json(body, host=host, timeout=timeout)
+        r = ctx.run_long(ps.wrap_json(body), host=host, timeout=timeout,
+                         progress=p.heartbeat("downloading"))
+        data = ps.parse_json(r.stdout)
+        p.report(100, "download complete")
+        if isinstance(data, dict) and "error" in data and "path" not in data:
+            raise RuntimeError(f"download failed: {data['error']}")
+        return data
 
     @mcp.tool
-    def tail_file(path: str, host: Optional[str] = None, lines: int = 50) -> dict:
-        """Return the last N lines of a text file on a box (snapshot)."""
+    def tail_file(path: str, host: Optional[str] = None, lines: int = 50,
+                  max_bytes: int = 20000) -> dict:
+        """Return the last N lines of a text file on a box (snapshot).
+
+        max_bytes caps the returned text (keeping the most recent bytes) so a detached job's
+        log full of a progress bar or stray binary output can't blow up the token budget.
+        Returns {path, lines, truncated}."""
         # Cast each line to a plain [string]: Get-Content decorates its output strings with
         # NoteProperties (PSPath/PSDrive/Provider/...) that ConvertTo-Json would otherwise
-        # expand into megabytes of provider/assembly metadata.
+        # expand into megabytes of provider/assembly metadata. Then cap the joined text to
+        # the last max_bytes characters BEFORE returning, so the cap happens on the box.
         body = (
             f"$t=@(Get-Content -LiteralPath {ps.ps_string(path)} -Tail {int(lines)} -ErrorAction Stop|"
             "ForEach-Object{[string]$_});"
-            "$result=@{path=" + ps.ps_string(path) + ";lines=$t}"
+            f"$j=($t -join \"`n\");$max={int(max_bytes)};$tr=$false;"
+            "if($j.Length -gt $max){$j=$j.Substring($j.Length-$max);$tr=$true};"
+            "$result=@{path=" + ps.ps_string(path) + ";lines=@($j -split \"`n\");truncated=$tr}"
         )
         return ctx.exec_json(body, host=host, timeout=120)
 
@@ -245,11 +284,13 @@ def register(mcp, ctx) -> None:
 
     @mcp.tool
     def sync_folder(local_path: str, remote_path: str, host: Optional[str] = None,
-                    mirror: bool = False) -> dict:
+                    mirror: bool = False, mcp_ctx: Context | None = None) -> dict:
         """Mirror a LOCAL operator folder to a box efficiently (zip → upload → expand).
         mirror=True wipes the destination first so it matches the source exactly."""
         if not os.path.isdir(local_path):
             return {"error": f"not a directory: {local_path}"}
+        prog = Progress(mcp_ctx, 100)
+        prog.report(5, f"zipping {local_path}")
         tmp_base = os.path.join(tempfile.gettempdir(), "winrdp_sync_" + binascii.hexlify(os.urandom(4)).decode())
         zip_path = shutil.make_archive(tmp_base, "zip", local_path)
         try:
@@ -258,7 +299,11 @@ def register(mcp, ctx) -> None:
             rid = binascii.hexlify(os.urandom(4)).decode()
             remote_zip = f"{REMOTE_TMP}\\sync_{rid}.zip"
             t = ctx.transport_for(host)
-            t.upload(data, remote_zip)
+            prog.report(15, f"uploading archive ({len(data)} bytes)")
+            t.upload(data, remote_zip,
+                     progress=lambda done, tot: prog.report(15 + int(done / max(tot, 1) * 70),
+                                                             f"uploading archive {done}/{tot} bytes"))
+            prog.report(90, "expanding on the box")
             clear = (f"if(Test-Path {ps.ps_string(remote_path)}){{Remove-Item -LiteralPath {ps.ps_string(remote_path)} "
                      "-Recurse -Force}};") if mirror else ""
             body = (
@@ -270,7 +315,9 @@ def register(mcp, ctx) -> None:
                 "$result=@{dest=" + ps.ps_string(remote_path) + ";files=$n;mirror=" +
                 ("$true" if mirror else "$false") + "}"
             )
-            return ctx.exec_json(body, host=host, timeout=600)
+            out = ctx.exec_json(body, host=host, timeout=600)
+            prog.report(100, "sync complete")
+            return out
         finally:
             try:
                 os.remove(zip_path)
@@ -278,8 +325,16 @@ def register(mcp, ctx) -> None:
                 pass
 
     @mcp.tool
-    def transfer_between_hosts(src_host: str, src_path: str, dst_host: str, dst_path: str) -> dict:
+    def transfer_between_hosts(src_host: str, src_path: str, dst_host: str, dst_path: str,
+                               mcp_ctx: Context | None = None) -> dict:
         """Copy a file from one registered box to another, straight through the controller."""
+        prog = Progress(mcp_ctx, 100)
+        prog.report(5, f"downloading from {src_host}:{src_path}")
         data = ctx.transport_for(src_host).download(src_path)
-        ctx.transport_for(dst_host).upload(data, dst_path)
+        prog.report(50, f"uploading {len(data)} bytes to {dst_host}:{dst_path}")
+        ctx.transport_for(dst_host).upload(
+            data, dst_path,
+            progress=lambda done, tot: prog.report(50 + int(done / max(tot, 1) * 50),
+                                                    f"uploading {done}/{tot} bytes"))
+        prog.report(100, "transfer complete")
         return {"ok": True, "src": f"{src_host}:{src_path}", "dst": f"{dst_host}:{dst_path}", "bytes": len(data)}

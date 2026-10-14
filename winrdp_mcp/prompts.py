@@ -19,7 +19,9 @@ def register(mcp, ctx) -> None:
             f"Provision and harden the Windows box at {host}. Do it step by step, reporting each result:\n"
             f"1. add_host(alias='{alias}', host='{host}', username='{username}', password='<given>').\n"
             f"2. provision_host() — confirm it reports success and a fast-transfer channel. If it can't reach "
-            f"the box, surface the bootstrap_oneliner and stop.\n"
+            f"the box, run diagnose_host() to find out why (proxy breaking NTLM → retry with "
+            f"provision_host(enable_basic=True); a closed provider-firewall port; wrong creds) and act on "
+            f"its recommendation; if it's genuinely only RDP, surface the bootstrap_oneliner and stop.\n"
             f"3. system_info() and health_report() — sanity-check OS/build/resources.\n"
             f"4. rdp_enable(nla=True); confirm with rdp_status().\n"
             f"5. apply_baseline() — high-performance power plan, no sleep, long paths.\n"
@@ -93,4 +95,24 @@ def register(mcp, ctx) -> None:
             f"2. Open a tunnel: port_forward(remote_port={remote_port}, host='{host}'). It needs OpenSSH on "
             f"the box; if it fails, run enable_ssh() (or re-run provision_host) first.\n"
             f"3. Give me the local_url it returns, and remind me to port_forward_stop() when done."
+        )
+
+    @mcp.prompt
+    def fix_connection(host: str = "") -> str:
+        """Figure out why a box won't connect and get it working."""
+        h = f" for host '{host}'" if host else " for the active host"
+        return (
+            f"A box{h} won't connect. Find the cause and fix it:\n"
+            f"1. diagnose_host() — read its verdict and recommendations. It detects an intercepting "
+            f"proxy/VPN on the operator side, which auth schemes WinRM offers, the real auth error, and SSH.\n"
+            f"2. Act on the verdict:\n"
+            f"   - 'proxy breaking NTLM' / credentials-rejected while the operator network intercepts → the "
+            f"password is likely fine; enable Basic: provision_host(enable_basic=True) (or, if only RDP is "
+            f"reachable, rdp_bootstrap(enable_basic=True) then paste once), and re-register the host with "
+            f"winrm_auth='basic' (or set WINRDP_DEFAULT_WINRM_AUTH=basic).\n"
+            f"   - 'credentials rejected' with NO proxy → verify the password / check for account lockout.\n"
+            f"   - 'timeout/refused' → the provider firewall is blocking 5985/22; open it inbound, or if only "
+            f"RDP is open use rdp_bootstrap().\n"
+            f"   - 'works with auth=basic' → just re-register with winrm_auth='basic'.\n"
+            f"3. Re-run diagnose_host()/system_info() to confirm it connects, and report what the fix was."
         )

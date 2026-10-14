@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
 from ..config import WINRM_HTTP_PORT
+from ..progress import Context, Progress
 from ..provision import _scan
 from ..transports import port_open
 from ..vault import Host
@@ -21,7 +23,7 @@ def register(mcp, ctx) -> None:
         domain: str = "",
         transport: str = "auto",
         use_ssl: bool = False,
-        winrm_auth: str = "ntlm",
+        winrm_auth: str = "",
         winrm_port: int = 5985,
         ssh_port: int = 22,
         rdp_port: int = 3389,
@@ -37,11 +39,15 @@ def register(mcp, ctx) -> None:
         trusted cert — recommended for production over HTTPS).
         ssh_host_key_policy: "auto" (trust-on-first-use) or "reject" (known_hosts only).
         tags: optional comma-separated labels for fan-out grouping (e.g. "prod,web").
+        winrm_auth: "ntlm" (default) or "basic". Leave empty to use WINRDP_DEFAULT_WINRM_AUTH
+        (handy when your operator network is behind a proxy that breaks NTLM — set it to
+        'basic' once and every add_host defaults to Basic).
         Credentials are stored encrypted at rest. Set make_active to target it by default.
         """
+        auth = winrm_auth or os.environ.get("WINRDP_DEFAULT_WINRM_AUTH", "") or "ntlm"
         h = Host(
             alias=alias, host=host, username=username, password=password, domain=domain,
-            transport=transport, use_ssl=use_ssl, winrm_auth=winrm_auth,
+            transport=transport, use_ssl=use_ssl, winrm_auth=auth,
             winrm_port=winrm_port, ssh_port=ssh_port, rdp_port=rdp_port,
             winrm_cert_validation=winrm_cert_validation, ssh_host_key_policy=ssh_host_key_policy,
             tags=[t.strip() for t in tags.split(",") if t.strip()],
@@ -89,11 +95,26 @@ def register(mcp, ctx) -> None:
         return result
 
     @mcp.tool
+    def diagnose_host(host: Optional[str] = None) -> dict:
+        """Explain WHY a box won't connect, and what to do — a connectivity doctor.
+
+        Beyond test_host's "No working transport", this detects an intercepting proxy/VPN on
+        the operator side (which makes port scans lie and breaks NTLM), shows which auth
+        schemes the WinRM listener offers, actually tries each transport and classifies the
+        real error (credentials-rejected vs timeout vs proxy-mangled NTLM), probes SSH, and
+        returns a verdict with concrete recommendations (e.g. use winrm_auth='basic', open a
+        provider-firewall port, or route the IP DIRECT in your proxy)."""
+        from ..diagnostics import diagnose
+        return diagnose(ctx.resolve(host))
+
+    @mcp.tool
     def provision_host(
         host: Optional[str] = None,
         enable_ssh: bool = False,
         allow_wmi_bootstrap: bool = True,
         fast_transfer: bool = True,
+        enable_basic: bool = False,
+        mcp_ctx: Context | None = None,
     ) -> dict:
         """Zero-config provision: make a box remotely manageable no matter its state.
 
@@ -104,9 +125,15 @@ def register(mcp, ctx) -> None:
         chunked path. Run this once per box right after add_host. Returns a detailed report;
         if it cannot auto-enable remoting, `bootstrap_oneliner` is a command to paste into
         an existing RDP session on the box once.
+
+        enable_basic=True turns on WinRM Basic auth everywhere it runs the enable script (and
+        connects via Basic) — use it when your OPERATOR network is behind a proxy/VPN that
+        breaks NTLM. Equivalent to add_host(winrm_auth='basic') + enabling Basic on the box.
         """
+        p = Progress(mcp_ctx, 100)
         return ctx.provision(host, enable_ssh=enable_ssh, allow_wmi_bootstrap=allow_wmi_bootstrap,
-                             fast_transfer=fast_transfer)
+                             fast_transfer=fast_transfer, enable_basic=enable_basic,
+                             progress_cb=lambda pct, msg: p.report(pct, msg))
 
     @mcp.tool
     def run_on_hosts(
@@ -143,27 +170,36 @@ def register(mcp, ctx) -> None:
         return {"hosts": targets, "results": out}
 
     @mcp.tool
-    def reboot_and_wait(host: Optional[str] = None, timeout: int = 300, force: bool = True) -> dict:
+    def reboot_and_wait(host: Optional[str] = None, timeout: int = 300, force: bool = True,
+                        mcp_ctx: Context | None = None) -> dict:
         """Reboot a box and block until it is reachable again (WinRM/SSH back up).
         Essential for automation that must continue after a restart."""
         import time
 
         h = ctx.resolve(host)
+        p = Progress(mcp_ctx, timeout)
         flag = "/f " if force else ""
         ctx.transport_for(host).run_cmd(f"shutdown /r {flag}/t 3", timeout=30)
         ctx.invalidate(h.alias)
+        p.report(0, f"reboot issued on {h.alias}; waiting for it to go down")
         time.sleep(15)  # let it start going down
-        deadline = time.time() + timeout
+        start = time.time()
+        deadline = start + timeout
         port = h.winrm_port if h.transport in ("auto", "winrm") else h.ssh_port
         while time.time() < deadline:
+            elapsed = time.time() - start
             if port_open(h.host, port) or port_open(h.host, h.ssh_port) or port_open(h.host, WINRM_HTTP_PORT):
+                p.report(min(elapsed, timeout), f"{h.alias} port is back — verifying remoting")
                 try:
                     r = ctx.transport_for(host).run_ps("$env:COMPUTERNAME", timeout=20)
                     if r.ok:
+                        p.report(timeout, f"{h.alias} back online")
                         return {"online": True, "computername": r.stdout.strip(),
                                 "waited_s": round(timeout - (deadline - time.time()), 1)}
                 except Exception:
                     ctx.invalidate(h.alias)
+            else:
+                p.report(min(elapsed, timeout), f"waiting for {h.alias} to come back — {int(elapsed)}s/{timeout}s")
             time.sleep(5)
         return {"online": False, "message": f"box did not come back within {timeout}s"}
 

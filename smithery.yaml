@@ -16,11 +16,19 @@ startCommand:
       profile:
         type: string
         title: Tool profile
-        enum: [full, admin, rdp, core]
+        enum: [full, dynamic, admin, rdp, core]
         default: full
         description: >-
-          Which tool set to expose. 'full' = every tool (144); 'admin' = systems
-          administration; 'rdp' = RDP + desktop/GUI; 'core' = the essential subset.
+          Which tool set to expose. 'full' = every tool (147); 'dynamic' = lean core
+          with load-on-demand groups (enable_toolset); 'admin' = systems administration;
+          'rdp' = RDP + desktop/GUI; 'core' = the essential subset.
+      confirmDestructive:
+        type: boolean
+        title: Confirm destructive actions
+        default: false
+        description: >-
+          Require operator confirmation (via MCP elicitation) before any destructive tool
+          runs. Clients without elicitation fall back to their own destructiveHint gating.
       debug:
         type: boolean
         title: Debug logging
@@ -34,7 +42,8 @@ startCommand:
       env: Object.assign(
         {},
         config.vaultKey ? { WINRDP_VAULT_KEY: config.vaultKey } : {},
-        config.profile ? { WINRDP_PROFILE: config.profile } : {}
+        config.profile ? { WINRDP_PROFILE: config.profile } : {},
+        config.confirmDestructive ? { WINRDP_CONFIRM_DESTRUCTIVE: '1' } : {}
       )
     })
   exampleConfig:

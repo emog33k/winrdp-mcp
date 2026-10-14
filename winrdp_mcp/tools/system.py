@@ -6,6 +6,7 @@ import base64
 from typing import Optional
 
 from .. import ps
+from ..models import ExecResult
 
 try:  # rich image return when available
     from fastmcp.utilities.types import Image
@@ -43,7 +44,7 @@ def register(mcp, ctx) -> None:
         return {"stdout": r.stdout, "stderr": r.stderr, "rc": r.rc}
 
     @mcp.tool
-    def run_cmd(command: str, host: Optional[str] = None, timeout: int = 120) -> dict:
+    def run_cmd(command: str, host: Optional[str] = None, timeout: int = 120) -> ExecResult:
         """Run a cmd.exe command line on a box. Returns {stdout, stderr, rc}."""
         t = ctx.transport_for(host)
         r = t.run_cmd(command, timeout=timeout)

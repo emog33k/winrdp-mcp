@@ -3,6 +3,126 @@
 All notable changes to winrdp-mcp are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses semantic versioning.
 
+## [Unreleased]
+
+### Fixed
+- **`download_file` now survives slow/large downloads.** It ran the fetch in a single WinRM
+  request, so a transfer taking longer than the operation timeout dropped the session
+  mid-download (Connection closed). It now runs in a detached SYSTEM task polled with short
+  calls (like installs), tries WebClient then falls back to Invoke-WebRequest, negotiates
+  TLS 1.2/1.3, and returns `{path, bytes, sha256}` only once the file is complete.
+- **`file_upload` reports progress and prefers the fast channel.** The slow chunked-over-WinRM
+  path now emits byte-level progress notifications (a 7–8 MB upload no longer looks hung), and
+  SMB/SFTP is used in one shot whenever 445/22 is reachable (set up by `provision_host`).
+- **`tail_file` gained `max_bytes` (default 20000).** Caps the returned text to the most
+  recent bytes on the box, so a detached job's log full of a progress bar or stray binary
+  output can't blow up the token budget; returns a `truncated` flag.
+- **Provisioning no longer drops the RDP session.** The enable-WinRM script switched the
+  network profile Public→Private (`Set-NetConnectionProfile`), which forces Windows to
+  re-apply its per-profile firewall rules — on a fresh cloud box that dropped the live RDP
+  connection and blocked reconnects for a while. The switch was also redundant
+  (`Enable-PSRemoting -Force -SkipNetworkProfileCheck` already handles a Public network). It
+  is removed, and the script now keeps RDP explicitly enabled (`fDenyTSConnections=0` + the
+  Remote Desktop firewall group) before and after touching the firewall. This fixes both
+  `provision_host` over an existing channel and the paste-once `bootstrap_oneliner`.
+- **`provision_host`'s failure guidance no longer trusts the raw port scan.** A transparent
+  proxy / VPN on the operator side can make a TCP connect succeed for every port, so the
+  port scan can read all-open even when nothing is actually reachable. The Rung-4 message now
+  derives from what actually happened (real transport probe / cold-start outcomes) instead of
+  `reachable_ports`, so it recommends the right next step regardless of a misleading scan.
+
+### Added
+- **`WINRDP_DEFAULT_WINRM_AUTH` + `provision_host(enable_basic=…)` + `fix_connection` prompt.**
+  Three conveniences for operators behind an NTLM-breaking proxy: set
+  `WINRDP_DEFAULT_WINRM_AUTH=basic` so every `add_host` defaults to Basic without passing it
+  each time; `provision_host(enable_basic=True)` turns Basic on across the whole ladder (SSH
+  rung, WMI cold-start, harden, and the bootstrap one-liner) and connects via Basic; and the
+  new `fix_connection` prompt walks `diagnose_host` → the right fix.
+- **`diagnose_host` — a connectivity doctor.** Where `test_host` only says "No working
+  transport", `diagnose_host` explains *why* and *what to do*: it detects an intercepting
+  proxy/VPN on the operator side (a TCP connect to a guaranteed-dead IP that "succeeds"),
+  reports which auth schemes the WinRM listener advertises, actually tries each transport and
+  classifies the real error (credentials-rejected vs timeout vs proxy-mangled NTLM), probes
+  SSH, and returns a verdict plus concrete fixes (e.g. "re-register with winrm_auth='basic'",
+  "enable Basic", "open 5985 at the provider firewall"). Encodes the whole manual debugging
+  session this came out of into one call.
+- **Quieter SSH probing.** paramiko logged a full stack trace to stderr on every failed SSH
+  probe (a closed port, a proxy mangling the banner — normal during transport selection); it's
+  now silenced to CRITICAL unless `WINRDP_DEBUG` is set.
+- **Opt-in Basic auth for proxy/VPN operators (`enable_basic`).** When the operator machine
+  is behind a proxy/VPN that breaks connection-oriented NTLM (a rotating proxy: the multi-leg
+  NTLM/Negotiate handshake needs one persistent TCP connection it doesn't preserve, so WinRM
+  auth fails even with a correct password), `enable_winrm(basic=True)` and
+  `rdp_bootstrap(enable_basic=True)` turn on WinRM Basic auth + AllowUnencrypted on the box
+  (AllowUnencrypted via the policy registry key, so it works on a Public network profile
+  without the `winrm set` firewall error). Register the host with `winrm_auth="basic"` and the
+  stateless Basic scheme survives the proxy. Off by default (security tradeoff: over HTTP the
+  password travels near-cleartext — scope WinRM to your operator IP at the provider firewall).
+- **`winrdp://toolsets` resource** exposing the tool profiles and the on-demand toolset
+  catalog, so a client can see the structure (and how `enable_toolset` works) without a call.
+- **Bounded list tools.** `file_list` (`limit`, default 1000), `list_services` and
+  `list_installed_software` (`limit`, default 500) now cap their output on the box so a huge
+  directory / service list / software inventory can't flood the context. (`firewall_rules`,
+  `list_tasks`, `list_processes`, `net_connections`, `event_log`, etc. already had caps.)
+- **`task_stop(name)` — cancel a detached job cleanly.** Stops a scheduled task and kills
+  its process tree (the `task` returned by `run_powershell(detach=True)` / `start_process`),
+  then unregisters it. Previously the only option was `kill_process` by name, which is
+  imprecise. `run_powershell(detach=True)`'s note now points at `task_stop`.
+- **Progress notifications (MCP 2026 progress) across every long-running tool** — so nothing
+  ever looks hung. `provision_host` reports each ladder rung; the `wait_for_*` family and
+  `reboot_and_wait` report each poll with elapsed/timeout; and start/finish (or per-phase)
+  progress on `install_software`, `windows_update`, `download_file`, `file_upload`,
+  `sync_folder` + `transfer_between_hosts` (byte-level during the transfer), `pip_install`,
+  `ensure_runtime`, `ensure_package_manager`, `enable_ssh`, `deploy_ui_agent`,
+  `persist_as_service`, `install_rdp_wrapper`, `windows_features`, and `defender_scan` (21
+  tools total). Implemented via an injected FastMCP `Context` (`winrdp_mcp/progress.py`) that
+  is hidden from the tool input schema and bridges the async `report_progress` call from the
+  sync tool's worker thread; it is a no-op when the client sends no progress token, so nothing
+  breaks.
+- **Heartbeat during long single-operations** — so even a multi-minute install/scan never
+  looks idle between "start" and "finish". The detached scheduled-task poll loop
+  (`run_elevated`/`run_long`) now invokes a progress callback on every poll (~1.5s), emitting
+  "…— Ns elapsed". Wired into `install_software`, `download_file`, `ensure_runtime` (Python),
+  `windows_update`, `defender_scan`, `windows_features`, `ensure_package_manager`,
+  `persist_as_service`, and `install_rdp_wrapper` (the last four now take the detached poll
+  path via the new `run_long_json`, so the heartbeat works even on an already-elevated
+  session).
+- **`rdp_bootstrap` tool for RDP-only boxes.** When a fresh box exposes only RDP (3389) and
+  no WinRM/SSH/SMB, there is no remote-exec channel, so one manual paste is unavoidable.
+  `rdp_bootstrap` makes it near one-click: it copies the enable command to the operator's
+  local clipboard and launches mstsc with the saved credentials (clipboard redirection on),
+  so you paste once in an elevated PowerShell on the box, then re-run `provision_host`.
+  `provision_host`'s failure message now distinguishes "only RDP reachable" (→ `rdp_bootstrap`)
+  from "SMB+DCOM open but impacket not installed" (→ `pip install 'winrdp-mcp[bootstrap]'`).
+- **`dynamic` tool profile — load-on-demand tool discovery.** Set `WINRDP_PROFILE=dynamic`
+  to start with a lean ~41-tool core plus three meta-tools (`list_toolsets`,
+  `enable_toolset`, `disable_toolset`). The model pulls in a group (`rdp`, `gui`, `network`,
+  `files`, `admin`, …) only when a task needs it, keeping the up-front tool list small per
+  the 2026 MCP guidance on context bloat. FastMCP emits `tools/list_changed` so clients
+  re-fetch automatically. Nothing is removed from the product — every tool is still
+  reachable.
+- **Structured output (`outputSchema`) for command results.** The seven tools that return a
+  server-constructed `{stdout, stderr, rc}` now advertise a precise JSON Schema via the
+  `ExecResult` type (`run_cmd`, `run_elevated`, `service_delete`, `grant_acl`, `take_own`,
+  `gui_script`, `rdp_connect_to_console`). Live-data tools (`system_info`, `performance`,
+  `rdp_status`, `ping`, `port_check`, `event_log`, `cim_query`, …) intentionally keep a loose
+  `dict`/`list` return: FastMCP validates every response against the schema, and CIM/registry
+  values vary per box and can be null, so a fixed per-field schema would reject otherwise-valid
+  responses.
+- **Optional server-side confirmation for destructive tools (`WINRDP_CONFIRM_DESTRUCTIVE=1`).**
+  Uses MCP elicitation to ask the operator before a destructive tool runs — a safety net on
+  top of client-side `destructiveHint` gating. Clients without elicitation support fall back
+  to that gating (the call proceeds), so it never breaks automation.
+
+### Changed
+- **Richer tool annotations.** `idempotentHint` is now set on idempotent writers (so a
+  client can safely retry after a dropped connection), the `title` is a human-readable
+  display name (e.g. "Run PowerShell" instead of `run_powershell`), and `openWorldHint` is
+  `false` for tools that stay inside the target box. Completes the four-hint set the 2026
+  spec recommends.
+- **Bumped minimum FastMCP to `>=2.11.0`** to guarantee structured-output support.
+- Synced the version across `pyproject.toml`, `server.json`, and `dxt/manifest.json`.
+
 ## [0.1.5] — 2026-09-23
 
 ### Fixed

@@ -8,6 +8,8 @@ import tempfile
 from typing import Optional
 
 from .. import ps
+from ..models import ExecResult
+from ..progress import Context, Progress
 from . import _validate as V
 
 TS_KEY = r"HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server"
@@ -113,7 +115,7 @@ def register(mcp, ctx) -> None:
 
     @mcp.tool
     def rdp_connect_to_console(session_id: int, host: Optional[str] = None,
-                               target: str = "console") -> dict:
+                               target: str = "console") -> ExecResult:
         """Redirect a session to the console with ``tscon`` (session steal/handoff).
         Requires SYSTEM; runs elevated."""
         V.token(target, "target")
@@ -183,7 +185,7 @@ def register(mcp, ctx) -> None:
 
     @mcp.tool
     def install_rdp_wrapper(host: Optional[str] = None, url: Optional[str] = None,
-                            timeout: int = 600) -> dict:
+                            timeout: int = 600, mcp_ctx: Context | None = None) -> dict:
         """Install RDP Wrapper to allow concurrent RDP sessions on client SKUs (Win10/11),
         which the built-in single-session limit otherwise blocks.
 
@@ -209,7 +211,12 @@ def register(mcp, ctx) -> None:
             "if($bat){Start-Process -FilePath $bat.FullName -ArgumentList '-i','-s' -WorkingDirectory $bat.Directory -Wait -Verb RunAs;"
             "$result=@{installed=$true;ran=$bat.Name}}else{$result=@{installed=$false;error='install.bat/RDPWInst not found in archive'}}"
         )
-        return ctx.exec_json(body, host=host, elevated=True, timeout=timeout)
+        prog = Progress(mcp_ctx, 100)
+        prog.report(15, "downloading and installing RDP Wrapper")
+        out = ctx.run_long_json(body, host=host, timeout=timeout,
+                                progress=prog.heartbeat("installing RDP Wrapper"))
+        prog.report(100, "RDP Wrapper install finished")
+        return out
 
     @mcp.tool
     def rdp_allow_multiple_sessions(host: Optional[str] = None, enable: bool = True) -> dict:

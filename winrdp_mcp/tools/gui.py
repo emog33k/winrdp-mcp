@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Optional
 
 from .. import ps
+from ..models import ExecResult
 
 try:  # rich image return for record_screen when available
     from fastmcp.utilities.types import Image
@@ -241,7 +242,7 @@ def register(mcp, ctx) -> None:
 
     # ------------------------------------------------------------------ batch
     @mcp.tool
-    def gui_script(script: str, host: Optional[str] = None, timeout: int = 180) -> dict:
+    def gui_script(script: str, host: Optional[str] = None, timeout: int = 180) -> ExecResult:
         """Run a PowerShell block in the interactive session with GUI helpers pre-loaded —
         the one-call way to do a multi-step GUI sequence without paying per-action latency.
 

@@ -79,10 +79,10 @@ class Context:
             except Exception:
                 pass
 
-    def provision(self, host: Optional[str] = None, **kw) -> dict:
+    def provision(self, host: Optional[str] = None, *, progress_cb=None, **kw) -> dict:
         h = self.resolve(host)
         self.invalidate(h.alias)
-        rep = provision(h, **kw)
+        rep = provision(h, progress_cb=progress_cb, **kw)
         self.vault.update(h)
         return rep.to_dict()
 
@@ -102,6 +102,7 @@ class Context:
         as_user: bool = False,
         loopback: bool = False,
         timeout: int = 120,
+        progress=None,
     ) -> ExecResult:
         h = self.resolve(host)
         t = self.transport_for(host)
@@ -116,7 +117,8 @@ class Context:
             # already elevated: the network-logon token blocks outbound 127.0.0.1, but the
             # task's service/batch logon does not.
             if loopback or (elevated and not t.is_elevated()):
-                er = elevation.run_elevated(t, script, timeout=timeout, run_as="SYSTEM")
+                er = elevation.run_elevated(t, script, timeout=timeout, run_as="SYSTEM",
+                                            progress=progress)
                 return ExecResult(er.stdout, er.stderr, er.rc)
             # Either not elevated, or the session already holds a full admin token — run
             # directly (over WinRM this is the fast, common case).
@@ -182,6 +184,7 @@ class Context:
         depth: int = 6,
         timeout: int = 120,
         secrets: Optional[dict] = None,
+        progress=None,
     ) -> Any:
         """Run a JSON-emitting body (assigns ``$result``) and return parsed data.
 
@@ -194,23 +197,25 @@ class Context:
             prelude, paths = self._stage_secrets(t, secrets)
             try:
                 return self._exec_json(prelude + body, host=host, elevated=elevated,
-                                       depth=depth, timeout=timeout)
+                                       depth=depth, timeout=timeout, progress=progress)
             finally:
                 self._cleanup_paths(t, paths)
-        return self._exec_json(body, host=host, elevated=elevated, depth=depth, timeout=timeout)
+        return self._exec_json(body, host=host, elevated=elevated, depth=depth,
+                               timeout=timeout, progress=progress)
 
     def _exec_json(self, body: str, *, host: Optional[str], elevated: bool, depth: int,
-                   timeout: int) -> Any:
+                   timeout: int, progress=None) -> Any:
         script = ps.wrap_json(body, depth=depth)
         if elevated and not self.transport_for(host).is_elevated():
             t = self.transport_for(host)
-            r = elevation.run_elevated(t, script, timeout=timeout)
+            r = elevation.run_elevated(t, script, timeout=timeout, progress=progress)
             return ps.parse_json(r.stdout)
         # already-elevated session (or elevated not needed): run directly
-        r = self.exec_ps(script, host=host, timeout=timeout)
+        r = self.exec_ps(script, host=host, timeout=timeout, progress=progress)
         return ps.parse_json(r.stdout)
 
-    def run_long(self, script: str, *, host: Optional[str] = None, timeout: int = 1800) -> ExecResult:
+    def run_long(self, script: str, *, host: Optional[str] = None, timeout: int = 1800,
+                 progress=None) -> ExecResult:
         """Run a long (minutes-scale) command detached, then poll for completion.
 
         A multi-minute command (a package install, a Windows Update) cannot be held open
@@ -218,10 +223,22 @@ class Context:
         an independent one-shot Scheduled Task (SYSTEM) and polls a done-marker with short
         calls that survive a mid-install disconnect (the transport self-heals). Use for
         software installs and other long operations instead of a plain elevated exec.
+
+        progress: optional ``callable(elapsed_seconds)`` invoked on each poll, so a caller can
+        emit a heartbeat and the op never looks hung.
         """
         t = self.transport_for(host)
-        er = elevation.run_elevated(t, script, timeout=timeout, run_as="SYSTEM")
+        er = elevation.run_elevated(t, script, timeout=timeout, run_as="SYSTEM", progress=progress)
         return ExecResult(er.stdout, er.stderr, er.rc)
+
+    def run_long_json(self, body: str, *, host: Optional[str] = None, timeout: int = 1800,
+                      depth: int = 6, progress=None) -> Any:
+        """Like :meth:`run_long` but for a JSON-emitting body (assigns ``$result``): always
+        takes the detached poll path (so a heartbeat works even on an already-elevated
+        session) and returns parsed data. Runs as SYSTEM — use only where that is fine."""
+        r = self.run_long(ps.wrap_json(body, depth=depth), host=host, timeout=timeout,
+                          progress=progress)
+        return ps.parse_json(r.stdout)
 
     def close(self) -> None:
         with self._lock:

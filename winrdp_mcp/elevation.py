@@ -87,6 +87,7 @@ def run_elevated(
     run_as: str = "SYSTEM",
     password: Optional[str] = None,
     poll: float = 1.5,
+    progress=None,
 ) -> ElevatedResult:
     """Execute ``script`` with a full elevated token via a transient Scheduled Task."""
     rid = _rid()
@@ -129,11 +130,17 @@ def run_elevated(
     reg_lines.append(f"Start-ScheduledTask -TaskName {ps.ps_string(task)}")
     transport.run_ps(";".join(reg_lines), timeout=60).raise_for_status("register elevated task")
     try:
-        deadline = time.time() + timeout
+        start = time.time()
+        deadline = start + timeout
         while time.time() < deadline:
             chk = transport.run_ps(f"Test-Path -LiteralPath {ps.ps_string(done_f)}", timeout=30)
             if "True" in chk.stdout:
                 break
+            if progress is not None:
+                try:
+                    progress(time.time() - start)
+                except Exception:  # noqa: BLE001 — a heartbeat must never break the run
+                    pass
             time.sleep(poll)
         else:
             raise TransportError(f"elevated task timed out after {timeout}s")
@@ -195,8 +202,8 @@ def run_detached(transport: Transport, script: str, *, run_as: str = "SYSTEM") -
     return {
         "detached": True, "task": task, "stdout_log": out_f, "stderr_log": err_f,
         "note": ("running outside the WinRM Job Object (survives session close) and with "
-                 "loopback access. Read output with tail_file(stdout_log); stop it with "
-                 f"task_delete('{task}') + kill_process."),
+                 "loopback access. Read output with tail_file(stdout_log); stop it cleanly "
+                 f"with task_stop('{task}') (stops the task and kills its process tree)."),
     }
 
 

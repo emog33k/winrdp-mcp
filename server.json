@@ -7,14 +7,14 @@
     "url": "https://github.com/emog33k/winrdp-mcp",
     "source": "github"
   },
-  "version": "0.1.4",
+  "version": "0.1.5",
   "websiteUrl": "https://github.com/emog33k/winrdp-mcp",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "winrdp-mcp",
-      "version": "0.1.4",
+      "version": "0.1.5",
       "transport": {
         "type": "stdio"
       },
@@ -36,9 +36,21 @@
         },
         {
           "name": "WINRDP_PROFILE",
-          "description": "Tool profile to expose: full (default), admin, rdp, or core.",
+          "description": "Tool profile to expose: full (default), dynamic, admin, rdp, or core. 'dynamic' starts lean and loads tool groups on demand via enable_toolset.",
           "isRequired": false,
           "default": "full"
+        },
+        {
+          "name": "WINRDP_CONFIRM_DESTRUCTIVE",
+          "description": "Set to 1 to require operator confirmation (via MCP elicitation) before any destructive tool runs. Clients without elicitation fall back to their own destructiveHint gating.",
+          "isRequired": false,
+          "default": ""
+        },
+        {
+          "name": "WINRDP_DEFAULT_WINRM_AUTH",
+          "description": "Default WinRM auth for add_host when not specified: 'ntlm' (default) or 'basic'. Set to 'basic' when your operator network is behind a proxy/VPN that breaks NTLM.",
+          "isRequired": false,
+          "default": "ntlm"
         }
       ]
     }

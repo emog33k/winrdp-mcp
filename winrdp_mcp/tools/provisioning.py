@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 from typing import Optional
 
 from .. import elevation, tooling
-from ..provision import ENABLE_SSH_PS, ENABLE_WINRM_PS
+from ..models import ExecResult
+from ..progress import Context, Progress
+from ..provision import ENABLE_SSH_PS, bootstrap_oneliner, enable_winrm_script
 from . import _validate as V
 
 
@@ -40,7 +44,7 @@ def register(mcp, ctx) -> None:
     # ------------------------------------------------------------------ elevation / UAC
     @mcp.tool
     def run_elevated(script: str, host: Optional[str] = None, run_as: str = "SYSTEM",
-                     timeout: int = 300) -> dict:
+                     timeout: int = 300) -> ExecResult:
         """Run PowerShell with a full elevated token via a one-shot Scheduled Task.
         run_as 'SYSTEM' (default) needs no password. This is the real UAC bypass path used
         when a normal WinRM/SSH logon would otherwise get a filtered token."""
@@ -67,22 +71,89 @@ def register(mcp, ctx) -> None:
         return ctx.exec_json(script, host=host, elevated=True)
 
     @mcp.tool
-    def enable_winrm(host: Optional[str] = None) -> dict:
-        """(Re)run the WinRM enablement script on a box through the current transport."""
-        r = ctx.exec_ps(ENABLE_WINRM_PS, host=host, timeout=180)
-        return {"ok": "WINRDP_WINRM_ENABLED" in r.stdout, "stdout": r.stdout, "stderr": r.stderr}
+    def enable_winrm(host: Optional[str] = None, basic: bool = False) -> dict:
+        """(Re)run the WinRM enablement script on a box through the current transport.
+
+        basic=True also turns on Basic auth + AllowUnencrypted — needed when the OPERATOR
+        side is behind a proxy/VPN that breaks connection-oriented NTLM (rotating proxy etc.).
+        Then register the host with winrm_auth='basic'. Security tradeoff: over HTTP the
+        password travels near-cleartext — scope WinRM to your operator IP at the firewall."""
+        r = ctx.exec_ps(enable_winrm_script(basic), host=host, timeout=180)
+        return {"ok": "WINRDP_WINRM_ENABLED" in r.stdout,
+                "basic_enabled": (basic and "WINRDP_BASIC_ENABLED" in r.stdout),
+                "stdout": r.stdout, "stderr": r.stderr}
 
     @mcp.tool
-    def enable_ssh(host: Optional[str] = None) -> dict:
+    def enable_ssh(host: Optional[str] = None, mcp_ctx: Context | None = None) -> dict:
         """Install and start the Windows OpenSSH server on a box, open the firewall, and
         set PowerShell as the default SSH shell."""
+        prog = Progress(mcp_ctx, 100)
+        prog.report(10, "installing & starting OpenSSH server (download + feature install)")
         r = ctx.exec_ps(ENABLE_SSH_PS, host=host, elevated=True, timeout=300)
+        prog.report(100, "OpenSSH step finished")
         return {"ok": "WINRDP_SSH_ENABLED" in r.stdout, "stdout": r.stdout, "stderr": r.stderr}
+
+    @mcp.tool
+    def rdp_bootstrap(host: Optional[str] = None, open_rdp: bool = True,
+                      enable_basic: bool = False) -> dict:
+        """Last-resort bootstrap for a box where ONLY RDP (3389) is reachable — no WinRM, SSH,
+        or SMB — so there is no remote channel to run the enable script for you.
+
+        This makes the one manual step nearly one-click: it copies the enable-WinRM command to
+        THIS (operator) machine's clipboard and, if open_rdp, launches mstsc with the saved
+        credentials (clipboard redirection is on). You then just paste it once on the box:
+
+          1. In the RDP session: right-click Start -> 'Terminal (Admin)' / 'Windows PowerShell (Admin)'.
+          2. Paste (Ctrl+V) and press Enter. It prints WINRDP_WINRM_ENABLED when done.
+          3. Back here: re-run provision_host() — WinRM is now up and everything auto-detects.
+
+        Why a manual step at all: RDP is an interactive display protocol, not a remote-exec API,
+        so with every management port closed the controller cannot execute anything itself. Open
+        5985 (WinRM) or 22 (SSH) inbound at your provider firewall to make provisioning fully
+        automatic next time.
+
+        enable_basic=True makes the pasted command also turn on Basic auth — use it when your
+        OPERATOR machine is behind a proxy/VPN that breaks NTLM (rotating proxy etc.); then
+        register the host with winrm_auth='basic'."""
+        h = ctx.resolve(host)
+        line = bootstrap_oneliner(h, basic=enable_basic)
+        copied = False
+        if os.name == "nt":
+            try:
+                subprocess.run("clip", input=line.encode("utf-16-le"), check=True,
+                               capture_output=True)
+                copied = True
+            except Exception:  # noqa: BLE001 — clipboard is a convenience, not required
+                copied = False
+        launched = False
+        if open_rdp and os.name == "nt":
+            user = f"{h.domain}\\{h.username}" if h.domain else h.username
+            if h.password:
+                subprocess.run(["cmdkey", f"/generic:TERMSRV/{h.host}", f"/user:{user}",
+                                f"/pass:{h.password}"], capture_output=True)
+            try:
+                subprocess.Popen(["mstsc", f"/v:{h.host}:{h.rdp_port}"])
+                launched = True
+            except Exception:  # noqa: BLE001
+                launched = False
+        return {
+            "clipboard_copied": copied,
+            "rdp_launched": launched,
+            "oneliner": line,
+            "steps": [
+                "In the RDP session: Start (right-click) -> Terminal/PowerShell (Admin).",
+                "Paste (Ctrl+V) and press Enter; wait for 'WINRDP_WINRM_ENABLED'.",
+                "Back here: run provision_host() again.",
+            ],
+            "note": ("Command is on your clipboard; mstsc is connecting." if copied and launched
+                     else "Copy the 'oneliner' and paste it into an elevated PowerShell on the box."),
+        }
 
     # ------------------------------------------------------------------ interactive UI agent
     @mcp.tool
     def deploy_ui_agent(host: Optional[str] = None, port: int = 8765,
-                        auth_key: Optional[str] = None, bind: str = "127.0.0.1") -> dict:
+                        auth_key: Optional[str] = None, bind: str = "127.0.0.1",
+                        mcp_ctx: Context | None = None) -> dict:
         """Deploy the interactive-desktop UI agent (winremote-mcp) onto a box for
         click/type/OCR-level control, and start it as an HTTP MCP endpoint.
 
@@ -113,7 +184,10 @@ def register(mcp, ctx) -> None:
                 "ok": False,
                 "error": "python not found on box; install Python first or use PowerShell tools",
             }
+        prog = Progress(mcp_ctx, 100)
+        prog.report(15, "installing the UI agent (pip install winremote-mcp)")
         install = t.run_ps("python -m pip install --upgrade winremote-mcp", timeout=600)
+        prog.report(80, "starting the UI agent in the desktop session")
         keyarg = f" --auth-key {auth_key}" if auth_key else ""
         # launch in the interactive session so it can see the desktop
         launch = (
@@ -121,6 +195,7 @@ def register(mcp, ctx) -> None:
             f"'-NoProfile','-Command','winremote-mcp serve --http --host {bind} --port {int(port)}{keyarg}'"
         )
         r = elevation.run_in_user_session(t, launch, timeout=60)
+        prog.report(100, "UI agent deployed")
         h = ctx.resolve(host)
         if loopback:
             endpoint = f"http://127.0.0.1:{int(port)}/mcp"

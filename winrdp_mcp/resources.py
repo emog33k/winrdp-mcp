@@ -25,6 +25,24 @@ def register(mcp, ctx) -> None:
         }
         return json.dumps(data, indent=2)
 
+    @mcp.resource("winrdp://toolsets")
+    def toolsets_resource() -> str:
+        """The tool profiles and the on-demand toolset catalog (for the 'dynamic' profile)."""
+        from .tools import PROFILES
+        from .toolsets import CORE, DESCRIPTIONS, TOOLSETS
+        data = {
+            "profiles": {name: ("all tools" if sel is None else sorted(sel))
+                         for name, sel in PROFILES.items()},
+            "dynamic": {
+                "core_modules": CORE,
+                "toolsets": [{"name": n, "modules": TOOLSETS[n],
+                              "description": DESCRIPTIONS.get(n, "")} for n in sorted(TOOLSETS)],
+                "how": "In the 'dynamic' profile, call enable_toolset(name) to load a group, "
+                       "disable_toolset(name) to drop it.",
+            },
+        }
+        return json.dumps(data, indent=2)
+
     @mcp.resource("winrdp://host/{alias}/info")
     def host_info(alias: str) -> str:
         """A compact live summary of one box (OS, build, CPU/RAM, disks, uptime)."""
