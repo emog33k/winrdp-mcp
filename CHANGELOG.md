@@ -3,6 +3,15 @@
 All notable changes to winrdp-mcp are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses semantic versioning.
 
+## [0.1.7] — 2026-10-14
+
+### Fixed
+- **Server failed to start on Python 3.10 / 3.11** (regression in 0.1.6). The `ExecResult`
+  typed return used `typing.TypedDict`, which pydantic (via FastMCP's output-schema build)
+  rejects on Python < 3.12 (`PydanticUserError: use typing_extensions.TypedDict`). Switched
+  to `typing_extensions.TypedDict` and added `typing_extensions` as an explicit dependency.
+  0.1.6 is affected on 3.10/3.11; upgrade to 0.1.7 (or run on 3.12+).
+
 ## [0.1.6] — 2026-10-14
 
 MCP 2026-spec alignment (dynamic discovery, structured output, progress, elicitation),
