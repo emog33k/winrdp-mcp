@@ -34,7 +34,7 @@ classifiers = [
 
 # Core deps: controller mode needs nothing on the target box beyond WinRM/SSH/SMB.
 dependencies = [
-    "fastmcp>=2.11.0",
+    "fastmcp>=2.11.0,<4",
     "pywinrm>=0.4.3",
     "requests>=2.31.0",
     "requests-ntlm>=1.2.0",

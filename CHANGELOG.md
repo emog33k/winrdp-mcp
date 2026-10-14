@@ -11,6 +11,8 @@ All notable changes to winrdp-mcp are documented here. Format loosely follows
   rejects on Python < 3.12 (`PydanticUserError: use typing_extensions.TypedDict`). Switched
   to `typing_extensions.TypedDict` and added `typing_extensions` as an explicit dependency.
   0.1.6 is affected on 3.10/3.11; upgrade to 0.1.7 (or run on 3.12+).
+- **Pinned `fastmcp<4`.** FastMCP 4.0 is a new major with breaking changes to the
+  elicitation middleware and annotation fields; the server is tested against the 3.x line.
 
 ## [0.1.6] — 2026-10-14
 
