@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import binascii
+import hashlib
 import os
 import tempfile
 import time
@@ -162,14 +163,28 @@ def register(mcp, ctx) -> None:
         p.report(0, f"uploading {os.path.basename(local_path)} ({total / MB:.1f} MB via {channel or 'chunked'})")
         with open(local_path, "rb") as f:
             data = f.read()
+        sha = hashlib.sha256(data).hexdigest()
         started = time.time()
         t.upload(data, remote_path,
                  progress=lambda done, tot: p.report(done, f"uploaded {done}/{tot} bytes", total=tot))
         secs = max(time.time() - started, 0.001)
+        # Read the file back on the box: a one-shot channel can lie (a truncated SMB/SFTP
+        # write) and Defender can quarantine the file right after it lands. "ok" must mean
+        # the bytes are there.
+        vr = t.run_ps(
+            f"(Get-FileHash -LiteralPath {ps.ps_string(remote_path)} -Algorithm SHA256).Hash",
+            timeout=60, idempotent=True)
+        remote_sha = (vr.stdout or "").strip().upper()
+        if remote_sha != sha.upper():
+            return {"ok": False, "remote_path": remote_path, "bytes": total,
+                    "channel": channel or "chunked", "sha256": sha,
+                    "remote_sha256": remote_sha or None,
+                    "error": ("upload verification failed: remote SHA-256 does not match "
+                              "(partial write, or the file was removed/quarantined)")}
         p.report(total, "upload complete")
         return {"ok": True, "remote_path": remote_path, "bytes": total,
                 "channel": channel or "chunked", "seconds": round(secs, 1),
-                "mbps": round(total / MB / secs, 2)}
+                "mbps": round(total / MB / secs, 2), "sha256": sha, "verified": True}
 
     @mcp.tool
     def file_download(remote_path: str, local_path: str, host: Optional[str] = None) -> dict:

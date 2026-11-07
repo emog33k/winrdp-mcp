@@ -84,7 +84,7 @@ def _step(name: str, ok: bool, detail: str, **extra) -> dict:
 
 
 def _parse(transport: Transport, body: str, timeout: int) -> dict:
-    r = transport.run_ps(ps.wrap_json(body), timeout=timeout)
+    r = transport.run_ps(ps.wrap_json(body), timeout=timeout, idempotent=True)
     data = ps.parse_json(r.stdout)  # raises if the payload is absent
     if not isinstance(data, dict) or "error" in data:
         raise RuntimeError((data or {}).get("error") or f"no JSON payload (rc={r.rc})")

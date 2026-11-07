@@ -171,7 +171,8 @@ def run_elevated(
         start = time.time()
         deadline = start + timeout
         while time.time() < deadline:
-            chk = transport.run_ps(f"Test-Path -LiteralPath {ps.ps_string(done_f)}", timeout=30)
+            chk = transport.run_ps(f"Test-Path -LiteralPath {ps.ps_string(done_f)}",
+                                   timeout=30, idempotent=True)
             if "True" in chk.stdout:
                 break
             if progress is not None:

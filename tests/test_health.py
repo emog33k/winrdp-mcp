@@ -42,7 +42,7 @@ class FakeTransport:
         self.info_rc = info_rc
         self.files = {}
 
-    def run_ps(self, script, timeout=120):
+    def run_ps(self, script, timeout=120, idempotent=False):
         if "qwinsta" in script:
             return _out(self.session)
         if "LocalAccountTokenFilterPolicy" in script:

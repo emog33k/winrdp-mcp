@@ -47,12 +47,18 @@ def register(mcp, ctx) -> None:
         on the box, holding its locks; use this for anything that must not outlive the call.
         Not available with as_user=True (use task_stop there).
 
+        The script runs with $ErrorActionPreference='Stop' and $ProgressPreference=
+        'SilentlyContinue' (as every structured tool does), so a non-terminating error fails
+        the call with rc=1 instead of being silently ignored. Add `-ErrorAction
+        SilentlyContinue` at the cmdlet that is allowed to miss.
+
         Returns {stdout, stderr, rc}.
         """
         if detach:
             return ctx.run_detached(script, host=host)
         r = ctx.exec_ps(script, host=host, elevated=elevated, as_user=as_user,
-                        loopback=loopback, timeout=timeout, kill_on_timeout=kill_on_timeout)
+                        loopback=loopback, timeout=timeout, kill_on_timeout=kill_on_timeout,
+                        wrap=True)
         return {"stdout": r.stdout, "stderr": r.stderr, "rc": r.rc}
 
     @mcp.tool

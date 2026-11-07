@@ -173,6 +173,7 @@ def test_file_upload_reports_channel_and_throughput(tools, tmp_path):
     r = tools["file_upload"](str(f), str(tmp_path / "out.bin"), host="_sy_local")
     assert r["ok"] is True and r["bytes"] == 2048
     assert r["channel"] == "local" and r["seconds"] >= 0 and r["mbps"] >= 0
+    assert r["verified"] is True and len(r["sha256"]) == 64
 
 
 @needs_windows

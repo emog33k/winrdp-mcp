@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import binascii
 import gzip
+import hashlib
 import io
 import os
 import shlex
@@ -128,17 +129,19 @@ class Transport:
                     "[Security.Principal.WindowsIdentity]::GetCurrent())."
                     "IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))"
                     "{'ELEV_YES'}else{'ELEV_NO'}",
-                    timeout=30,
+                    timeout=30, idempotent=True,
                 )
                 self._elevated = "ELEV_YES" in r.stdout
             except Exception:
                 self._elevated = False
         return self._elevated
 
-    def run_ps(self, script: str, timeout: int = 120) -> ExecResult:  # pragma: no cover
+    def run_ps(self, script: str, timeout: int = 120,
+               idempotent: bool = False) -> ExecResult:  # pragma: no cover
         raise NotImplementedError
 
-    def _run_ps_inline(self, script: str, timeout: int = 120, idempotent: bool = True) -> ExecResult:
+    def _run_ps_inline(self, script: str, timeout: int = 120,
+                       idempotent: bool = False) -> ExecResult:
         """Run a short script WITHOUT the large-script staging path.
 
         The base :meth:`upload` chunk loop calls this so a transport that stages large
@@ -173,15 +176,46 @@ class Transport:
         # gzip first: the fallback's cost is round-trips, and its usual payload (a staged .ps1)
         # compresses ~3-5x, so this cuts chunk count proportionally. The box decompresses on
         # finalize. (Incompressible data costs ~18 bytes of header — negligible.)
-        b64 = base64.b64encode(gzip.compress(data)).decode("ascii")
+        payload = gzip.compress(data)
+        digest = hashlib.sha256(payload).hexdigest()
+        b64 = base64.b64encode(payload).decode("ascii")
         tmp = remote_path + ".gz.b64"
-        self._run_ps_inline(
-            f"if(Test-Path {ps.ps_string(tmp)}){{Remove-Item -LiteralPath {ps.ps_string(tmp)} -Force}}",
-            idempotent=False,
-        ).raise_for_status()
+        state = remote_path + ".gz.state"
         total = len(data)
         n_b64 = len(b64)
-        for i in range(0, n_b64, _CHUNK):
+
+        # Resume support. The state file binds the temp to THIS payload (digest of the
+        # compressed bytes); the temp's length is how many base64 chars already landed.
+        # AppendAllText is atomic per chunk, so that length is a chunk boundary — a partial
+        # tail is truncated defensively. A different payload resets the temp.
+        prep = (
+            f"$p={ps.ps_string(remote_path)};$t={ps.ps_string(tmp)};$s={ps.ps_string(state)};"
+            "$d=Split-Path $p -Parent;"
+            "if($d -and -not(Test-Path $d)){New-Item -ItemType Directory -Path $d -Force|Out-Null};"
+            f"$want={ps.ps_string(digest)};$have=$null;"
+            "if(Test-Path -LiteralPath $s){$have=(Get-Content -LiteralPath $s -Raw).Trim()};"
+            "if($have -ne $want){"
+            "Remove-Item -LiteralPath $t -Force -ErrorAction SilentlyContinue;"
+            "Set-Content -LiteralPath $s -Value $want -Encoding ascii;$off=0"
+            "}elseif(Test-Path -LiteralPath $t){$off=(Get-Item -LiteralPath $t).Length}else{$off=0};"
+            "Write-Output $off"
+        )
+        r = self.run_ps(prep, timeout=timeout)
+        r.raise_for_status("prepare upload")
+        try:
+            off = int((r.stdout or "0").strip().splitlines()[-1] or 0)
+        except (ValueError, IndexError):
+            off = 0
+        off -= off % _CHUNK
+        if off < 0 or off > n_b64:
+            off = 0
+        if off:
+            self._run_ps_inline(
+                f"$f=[IO.File]::Open({ps.ps_string(tmp)},'Open','Write');"
+                f"$f.SetLength({off});$f.Close()",
+                timeout=timeout, idempotent=False,
+            ).raise_for_status("truncate partial chunk")
+        for i in range(off, n_b64, _CHUNK):
             chunk = b64[i:i + _CHUNK]
             # [IO.File]::AppendAllText opens→appends→closes the file atomically per call — no
             # lingering stream handle (Add-Content could fail "Stream was not readable" when a
@@ -207,7 +241,7 @@ class Transport:
             "$gz=New-Object System.IO.Compression.GZipStream($mi,[System.IO.Compression.CompressionMode]::Decompress);"
             "$mo=New-Object System.IO.MemoryStream;$gz.CopyTo($mo);$gz.Dispose();$mi.Dispose();"
             f"[IO.File]::WriteAllBytes({ps.ps_string(remote_path)},$mo.ToArray());$mo.Dispose();"
-            f"Remove-Item -LiteralPath {ps.ps_string(tmp)} -Force",
+            f"Remove-Item -LiteralPath {ps.ps_string(tmp)},{ps.ps_string(state)} -Force",
             timeout=timeout,
         ).raise_for_status("finalize upload")
 
@@ -307,7 +341,7 @@ class WinRMTransport(Transport):
         msg = str(exc)
         return "Code 400" in msg or "Code 500" in msg or "RemoteDisconnected" in msg
 
-    def _run(self, fn, *, idempotent: bool = True):
+    def _run(self, fn, *, idempotent: bool = False):
         """Run a pywinrm call, reconnecting + retrying once on a recoverable error.
 
         The retry is only safe for idempotent calls (reads/probes): a remote OperationTimeout
@@ -345,12 +379,16 @@ class WinRMTransport(Transport):
         except Exception:  # noqa: BLE001
             pass
 
-    def run_ps(self, script: str, timeout: int = 120, idempotent: bool = True) -> ExecResult:
+    def run_ps(self, script: str, timeout: int = 120,
+               idempotent: bool = False) -> ExecResult:
         # NOTE: no thread-based watchdog here. pywinrm's Session (requests.Session + the open
         # WSMan shell) is not thread-safe; abandoning a call mid-flight corrupts it and every
         # later request returns HTTP 400. Bounding comes from read_timeout_sec; a dropped or
         # wedged connection is healed by _run reconnecting and retrying once. All session use
         # is serialized by _oplock (reentrant, so the staging path below re-enters safely).
+        #
+        # idempotent defaults to False: a retry after a mid-flight drop can run a MUTATING
+        # script twice (two hung powershell.exe were exactly this). Reads opt in explicitly.
         if len(script) > _MAX_INLINE_PS:
             # pywinrm packs run_ps as `powershell -EncodedCommand <base64>` on ONE command
             # line; a big script overflows the length limit. Stage it and run via -File.
@@ -365,7 +403,8 @@ class WinRMTransport(Transport):
             rc=r.status_code,
         )
 
-    def _run_ps_inline(self, script: str, timeout: int = 120, idempotent: bool = True) -> ExecResult:
+    def _run_ps_inline(self, script: str, timeout: int = 120,
+                       idempotent: bool = False) -> ExecResult:
         # Same as run_ps but NEVER stages to a file: used by the base upload chunk loop so an
         # upload can't re-enter staging (which uploads → recurses). Chunks are < _MAX_INLINE_PS.
         with self._oplock:
@@ -517,7 +556,7 @@ class WinRMTransport(Transport):
 
     def probe(self) -> bool:
         try:
-            r = self.run_ps("$true", timeout=15)
+            r = self.run_ps("$true", timeout=15, idempotent=True)
             return r.ok
         except Exception:
             return False
@@ -561,7 +600,8 @@ class SSHTransport(Transport):
             timeout=15,
         )
 
-    def run_ps(self, script: str, timeout: int = 120) -> ExecResult:
+    def run_ps(self, script: str, timeout: int = 120,
+               idempotent: bool = False) -> ExecResult:
         if len(script) > _MAX_INLINE_PS:
             return self._run_ps_via_file(script, timeout)
         enc = ps.encode_command(script)
@@ -668,7 +708,8 @@ class LocalTransport(Transport):
     def _powershell_exe(self) -> str:
         return "powershell.exe" if os.name == "nt" else "pwsh"
 
-    def run_ps(self, script: str, timeout: int = 120) -> ExecResult:
+    def run_ps(self, script: str, timeout: int = 120,
+               idempotent: bool = False) -> ExecResult:
         if len(script) > _MAX_INLINE_PS:
             return self._run_ps_via_file(script, timeout)
         enc = ps.encode_command(script)

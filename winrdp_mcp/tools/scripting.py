@@ -123,8 +123,9 @@ def register(mcp, ctx) -> None:
         """Run a script in any interpreter ON A REMOTE BOX (`host`, or the active host —
         never locally; see run_python for the host semantics).
 
-        interpreter: auto | python | node | powershell | cmd | bat | vbscript.
-        'auto' guesses from a shebang or obvious syntax, defaulting to PowerShell.
+        interpreter: auto | python | node | powershell | cmd | bat | vbscript (plus sh/bash
+        on a POSIX SSH host). 'auto' guesses from a shebang or obvious syntax, defaulting
+        to PowerShell. PowerShell content runs with $ErrorActionPreference='Stop'.
         `kill_on_timeout`: kill the remote process when `timeout` expires instead of
         leaving it running.
         Returns {host, interpreter, stdout, stderr, rc}.
@@ -139,7 +140,7 @@ def register(mcp, ctx) -> None:
 
         if interp == "powershell":
             r = ctx.exec_ps(content, host=host, elevated=elevated, as_user=as_user,
-                            timeout=timeout, kill_on_timeout=kill_on_timeout)
+                            timeout=timeout, kill_on_timeout=kill_on_timeout, wrap=True)
             return {"host": alias, "interpreter": interp, "stdout": r.stdout,
                     "stderr": r.stderr, "rc": r.rc}
 
