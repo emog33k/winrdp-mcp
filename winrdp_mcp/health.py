@@ -19,6 +19,7 @@ from __future__ import annotations
 import binascii
 import hashlib
 import os
+import shlex
 from typing import Optional
 
 from . import elevation, ps
@@ -95,9 +96,12 @@ def check_health(transport: Transport, *, expected_name: Optional[str] = None,
                  timeout: int = 90) -> dict:
     """Run the matrix. ``ok`` is true only when every step passes.
 
-    The caller gets ``{ok, failed_step, failed_steps, steps, capabilities, hostname}``.
-    ``capabilities`` says which interactive tools are usable on this box.
+    On a POSIX SSH host the Windows steps do not apply; :func:`check_health_posix` runs
+    hostname/root-or-sudo/SFTP-transfer/platform instead, so a Linux box is not reported
+    unhealthy for lacking a Windows desktop.
     """
+    if getattr(transport, "is_posix", lambda: False)():
+        return check_health_posix(transport, expected_name=expected_name, timeout=timeout)
     caps = {"as_user": False, "screenshot": False, "gui": False}
     try:
         info = _parse(transport, _INFO_PS, timeout)
@@ -174,7 +178,9 @@ def check_health(transport: Transport, *, expected_name: Optional[str] = None,
 def _transfer_step(transport: Transport, timeout: int) -> dict:
     """64 KiB random round-trip with a SHA-256 compare. chunked works but is a warning."""
     rid = binascii.hexlify(os.urandom(5)).decode()
-    remote = f"{REMOTE_TMP}\\winrdp_health_{rid}.bin"
+    posix = getattr(transport, "is_posix", lambda: False)()
+    remote = (f"/tmp/winrdp_health_{rid}.bin" if posix
+              else f"{REMOTE_TMP}\\winrdp_health_{rid}.bin")
     data = os.urandom(_TRANSFER_BYTES)
     expected = hashlib.sha256(data).hexdigest()
     try:
@@ -193,14 +199,18 @@ def _transfer_step(transport: Transport, timeout: int) -> dict:
         return _step("transfer", False, f"{type(e).__name__}: {e}", channel=None)
     finally:
         try:
-            transport.run_ps(
-                f"Remove-Item -LiteralPath {ps.ps_string(remote)} -Force "
-                "-ErrorAction SilentlyContinue", timeout=30)
+            if posix:
+                transport.run_sh(f"rm -f {shlex.quote(remote)}", timeout=30)
+            else:
+                transport.run_ps(
+                    f"Remove-Item -LiteralPath {ps.ps_string(remote)} -Force "
+                    "-ErrorAction SilentlyContinue", timeout=30)
         except Exception:  # noqa: BLE001
             pass
 
 
-def _result(steps: list, caps: dict, hostname: Optional[str]) -> dict:
+def _result(steps: list, caps: dict, hostname: Optional[str],
+            kind: str = "windows") -> dict:
     failed = [s["name"] for s in steps if not s["ok"]]
     return {
         "ok": not failed,
@@ -209,4 +219,55 @@ def _result(steps: list, caps: dict, hostname: Optional[str]) -> dict:
         "steps": steps,
         "capabilities": caps,
         "hostname": hostname,
+        "kind": kind,
     }
+
+
+def check_health_posix(transport: Transport, *, expected_name: Optional[str] = None,
+                       timeout: int = 90) -> dict:
+    """POSIX equivalent of the matrix: hostname, root/sudo, SFTP round-trip, uname."""
+    caps = {"as_user": False, "screenshot": False, "gui": False}
+    try:
+        r = transport.run_sh("hostname; id -un; id -u; uname -srm", timeout=60)
+        lines = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
+        hostname = lines[0] if lines else ""
+        user = lines[1] if len(lines) > 1 else ""
+        uid = lines[2] if len(lines) > 2 else ""
+        uname = lines[3] if len(lines) > 3 else ""
+    except Exception as e:  # noqa: BLE001
+        detail = f"{type(e).__name__}: {e}"
+        return _result([
+            _step("identity", False, detail), _step("principal", False, detail),
+            _step("transfer", False, "not run — shell probe failed"),
+            _step("elevation", False, "not run — shell probe failed"),
+            _step("session", False, "not run — shell probe failed"),
+            _step("platform", False, detail),
+        ], caps, None, kind="posix")
+
+    steps = []
+    if expected_name:
+        ident_ok = (hostname.casefold() == str(expected_name).casefold()
+                    or hostname.split(".", 1)[0].casefold() == str(expected_name).casefold())
+        ident_detail = f"hostname={hostname or '?'}, expected={expected_name}"
+    else:
+        ident_ok = bool(hostname)
+        ident_detail = f"hostname={hostname or '?'} (no expected name configured)"
+    steps.append(_step("identity", ident_ok, ident_detail))
+
+    sudo_ok = uid == "0"
+    if not sudo_ok:
+        try:
+            sr = transport.run_sh("sudo -n true && echo WINRDP_SUDO_OK", timeout=30)
+            sudo_ok = "WINRDP_SUDO_OK" in (sr.stdout or "")
+        except Exception:  # noqa: BLE001
+            sudo_ok = False
+    steps.append(_step("principal", sudo_ok,
+                       f"user={user}, uid={uid}, root/sudo={'yes' if sudo_ok else 'no'}"))
+
+    steps.append(_transfer_step(transport, timeout))
+    steps.append(_step("elevation", sudo_ok,
+                       f"root={uid == '0'}, sudo -n={'ok' if sudo_ok else 'unavailable'}"))
+    steps.append(_step("session", True,
+                       "not applicable on POSIX (no Windows interactive session)"))
+    steps.append(_step("platform", bool(uname), uname or "uname unavailable"))
+    return _result(steps, caps, hostname, kind="posix")

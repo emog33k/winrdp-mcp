@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import binascii
 import os
+import shlex
 from typing import Optional
 
 from .. import ps
@@ -18,6 +19,14 @@ from ..progress import Context, Progress
 
 def _rid(ext: str) -> str:
     return f"{REMOTE_TMP}\\winrdp_{binascii.hexlify(os.urandom(5)).decode()}.{ext}"
+
+
+def _rid_posix(ext: str) -> str:
+    return f"/tmp/winrdp_{binascii.hexlify(os.urandom(5)).decode()}.{ext}"
+
+
+def _is_posix(transport) -> bool:
+    return bool(getattr(transport, "is_posix", lambda: False)())
 
 
 def register(mcp, ctx) -> None:
@@ -48,15 +57,17 @@ def register(mcp, ctx) -> None:
 
         `pip`: optional comma/space-separated packages to install first (on the box).
         `ensure_python`: install Python automatically (winget) if it's missing.
-        `elevated`/`as_user`: full-token / interactive-desktop execution.
+        `elevated`/`as_user`: full-token / interactive-desktop execution. On a POSIX SSH
+        host, `elevated=True` prefixes `sudo -n`; `as_user`/`kill_on_timeout` are Windows-only.
         `kill_on_timeout`: kill the remote python process when `timeout` expires — by
         default a timeout only abandons the call and the script keeps running on the box.
         Returns {host, python, stdout, stderr, rc}.
         """
         alias = ctx.resolve(host).alias
         t = ctx.transport_for(host)
+        posix = _is_posix(t)
         py = _find_python(t)
-        if not py and ensure_python:
+        if not py and ensure_python and not posix:
             _install_python(ctx, host)
             py = _find_python(t)
         if not py:
@@ -64,8 +75,24 @@ def register(mcp, ctx) -> None:
                     "error": "Python not found on the box and could not be installed. "
                              "Call ensure_runtime or install manually."}
 
-        if pip:
-            pkgs = " ".join(p.strip() for p in pip.replace(",", " ").split() if p.strip())
+        pkgs = " ".join(p.strip() for p in pip.replace(",", " ").split() if p.strip())
+        if posix:
+            if pkgs:
+                t.run_sh(f"{shlex.quote(py)} -m pip install --disable-pip-version-check "
+                         f"-q {pkgs}", timeout=timeout).raise_for_status("pip install")
+            remote = _rid_posix("py")
+            t.upload(code.encode("utf-8"), remote)
+            runner = f"{shlex.quote(py)} {shlex.quote(remote)} {args}".strip()
+            if elevated:
+                runner = "sudo -n " + runner
+            try:
+                r = t.run_sh(runner, timeout=timeout)
+                return {"host": alias, "python": py, "stdout": r.stdout, "stderr": r.stderr,
+                        "rc": r.rc}
+            finally:
+                t.run_sh(f"rm -f {shlex.quote(remote)}", timeout=30)
+
+        if pkgs:
             t.run_ps(f"& {ps.ps_string(py)} -m pip install --disable-pip-version-check -q {pkgs}",
                      timeout=timeout).raise_for_status("pip install")
 
@@ -104,7 +131,12 @@ def register(mcp, ctx) -> None:
             return {"error": "Python not found; call ensure_runtime first"}
         pkgs = " ".join(p.strip() for p in packages.replace(",", " ").split() if p.strip())
         prog.report(10, f"pip installing {pkgs} (can take a while)")
-        r = t.run_ps(f"& {ps.ps_string(py)} -m pip install --disable-pip-version-check {pkgs}", timeout=timeout)
+        if _is_posix(t):
+            r = t.run_sh(f"{shlex.quote(py)} -m pip install --disable-pip-version-check {pkgs}",
+                         timeout=timeout)
+        else:
+            r = t.run_ps(f"& {ps.ps_string(py)} -m pip install --disable-pip-version-check {pkgs}",
+                         timeout=timeout)
         prog.report(100, "pip install finished")
         return {"python": py, "stdout": r.stdout[-4000:], "stderr": r.stderr[-1000:], "rc": r.rc}
 
@@ -136,6 +168,26 @@ def register(mcp, ctx) -> None:
 
         alias = ctx.resolve(host).alias
         t = ctx.transport_for(host)
+        posix = _is_posix(t)
+
+        if posix:
+            if interp not in ("python", "node", "sh", "bash"):
+                return {"host": alias,
+                        "error": f"interpreter '{interp}' is not available on a POSIX host; "
+                                 "use sh/bash/python/node"}
+            ext = {"python": "py", "node": "js", "sh": "sh", "bash": "sh"}[interp]
+            remote = _rid_posix(ext)
+            t.upload(content.encode("utf-8"), remote)
+            runner = {"python": _find_python(t) or "python3", "node": "node",
+                      "sh": "sh", "bash": "bash"}[interp]
+            try:
+                r = t.run_sh(f"{shlex.quote(runner)} {shlex.quote(remote)} {args}".strip(),
+                             timeout=timeout)
+                return {"host": alias, "interpreter": interp, "stdout": r.stdout,
+                        "stderr": r.stderr, "rc": r.rc}
+            finally:
+                t.run_sh(f"rm -f {shlex.quote(remote)}", timeout=30)
+
         t.run_ps(ps.ensure_remote_dirs())
 
         if interp == "powershell":
@@ -143,6 +195,9 @@ def register(mcp, ctx) -> None:
                             timeout=timeout, kill_on_timeout=kill_on_timeout, wrap=True)
             return {"host": alias, "interpreter": interp, "stdout": r.stdout,
                     "stderr": r.stderr, "rc": r.rc}
+
+        if interp in ("sh", "bash"):
+            return {"host": alias, "error": "sh/bash require a POSIX SSH host (transport=ssh)"}
 
         ext = {"python": "py", "node": "js", "cmd": "bat", "bat": "bat", "vbscript": "vbs"}.get(interp)
         if not ext:
@@ -165,6 +220,22 @@ def register(mcp, ctx) -> None:
             t.run_ps(f"Remove-Item -LiteralPath {ps.ps_string(remote)} -Force -ErrorAction SilentlyContinue")
 
     @mcp.tool
+    def run_sh(script: str, host: Optional[str] = None, timeout: int = 600) -> dict:
+        """Run a POSIX shell command on a Linux/macOS SSH host (not Windows).
+
+        Uses `sh -lc` over the SSH transport; the host must be registered with
+        transport="ssh" and actually run a POSIX shell.
+        """
+        alias = ctx.resolve(host).alias
+        t = ctx.transport_for(host)
+        if not _is_posix(t):
+            return {"host": alias,
+                    "error": "host has no POSIX shell; use run_powershell/run_cmd for Windows"}
+        r = t.run_sh(script, timeout=timeout)
+        return {"host": alias, "interpreter": "sh", "stdout": r.stdout, "stderr": r.stderr,
+                "rc": r.rc}
+
+    @mcp.tool
     def run_node(code: str, host: Optional[str] = None, args: str = "", timeout: int = 300,
                  kill_on_timeout: bool = False) -> dict:
         """Run inline Node.js code ON A REMOTE BOX (Node must be installed there)."""
@@ -177,6 +248,9 @@ def register(mcp, ctx) -> None:
         """Ensure a language runtime is installed on a box. runtime: python | node.
         Installs via winget (falls back to choco). Runs elevated."""
         prog = Progress(mcp_ctx, 100)
+        if _is_posix(ctx.transport_for(host)):
+            return {"error": "ensure_runtime installs Windows runtimes; on a POSIX host "
+                             "use the distro package manager (apt/dnf/apk)"}
         if runtime == "python":
             if _find_python(ctx.transport_for(host)):
                 return {"runtime": "python", "installed": True, "note": "already present"}
@@ -205,12 +279,16 @@ def register(mcp, ctx) -> None:
 
 # ---- helpers --------------------------------------------------------------
 def _find_python(transport) -> Optional[str]:
-    """Return a usable python.exe path on the box, or None.
+    """Return a usable python executable path on the box, or None.
 
     Resolves the concrete executable path (not just PATH) so it still works right after a
     fresh install — a new WinRM shell can inherit a stale PATH that doesn't yet include the
     just-installed Python, so we also glob the standard install locations.
     """
+    if _is_posix(transport):
+        r = transport.run_sh("command -v python3 || command -v python", timeout=30)
+        p = [ln.strip() for ln in r.stdout.strip().splitlines() if ln.strip()]
+        return p[-1] if p else None
     r = transport.run_ps(
         "$cands=New-Object Collections.Generic.List[string];"
         "$c=Get-Command python.exe -ErrorAction SilentlyContinue|"
@@ -254,6 +332,10 @@ def _guess_interpreter(content: str) -> str:
             return "node"
         if "cscript" in line or "wscript" in line:
             return "vbscript"
+        if "bash" in line:
+            return "bash"
+        if line.rstrip().endswith("sh"):
+            return "sh"
     if head.startswith("import ") or head.startswith("from ") or "print(" in head or "def " in head:
         return "python"
     if "console.log" in head or head.startswith("const ") or head.startswith("require("):

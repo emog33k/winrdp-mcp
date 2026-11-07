@@ -5,6 +5,7 @@ from __future__ import annotations
 import binascii
 import hashlib
 import os
+import shlex
 import tempfile
 import time
 from typing import Optional
@@ -171,9 +172,11 @@ def register(mcp, ctx) -> None:
         # Read the file back on the box: a one-shot channel can lie (a truncated SMB/SFTP
         # write) and Defender can quarantine the file right after it lands. "ok" must mean
         # the bytes are there.
-        vr = t.run_ps(
-            f"(Get-FileHash -LiteralPath {ps.ps_string(remote_path)} -Algorithm SHA256).Hash",
-            timeout=60, idempotent=True)
+        vr = (t.run_sh(f"sha256sum {shlex.quote(remote_path)} | cut -d' ' -f1", timeout=60)
+              if getattr(t, "is_posix", lambda: False)()
+              else t.run_ps(
+                  f"(Get-FileHash -LiteralPath {ps.ps_string(remote_path)} -Algorithm SHA256).Hash",
+                  timeout=60, idempotent=True))
         remote_sha = (vr.stdout or "").strip().upper()
         if remote_sha != sha.upper():
             return {"ok": False, "remote_path": remote_path, "bytes": total,

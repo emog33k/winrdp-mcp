@@ -117,6 +117,7 @@ def register(mcp, ctx) -> None:
                 t, expected_name=(expected_name or h.expected_name or None))
             result.update({
                 "transport": t.name, "ok": hc["ok"], "online": hc["ok"],
+                "kind": hc.get("kind", "windows"),
                 "failed_step": hc["failed_step"], "failed_steps": hc["failed_steps"],
                 "steps": hc["steps"], "capabilities": hc["capabilities"],
                 "computername": hc.get("hostname"),
@@ -130,7 +131,8 @@ def register(mcp, ctx) -> None:
             })
         if not result.get("ok") or result.get("failed_step") == "transport":
             ctx.invalidate(h.alias)
-            result["bootstrap_oneliner"] = bootstrap_oneliner(h)
+            if result.get("kind") != "posix":  # the bootstrap one-liner is Windows-only
+                result["bootstrap_oneliner"] = bootstrap_oneliner(h)
         return result
 
     @mcp.tool

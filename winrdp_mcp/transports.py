@@ -583,6 +583,7 @@ class SSHTransport(Transport):
         self.host = host
         self.port = port
         self._oplock = threading.RLock()  # serialize channel/SFTP use (paramiko isn't safe under races)
+        self._posix: Optional[bool] = None  # cached: does this host have a POSIX shell?
         self._client = paramiko.SSHClient()
         self._client.load_system_host_keys()
         # host_key_policy: "auto" = trust-on-first-use (pragmatic for fresh boxes),
@@ -599,6 +600,22 @@ class SSHTransport(Transport):
             allow_agent=bool(key_filename),
             timeout=15,
         )
+
+    def is_posix(self) -> bool:
+        """True when the SSH host runs a POSIX shell (Linux/macOS), not Windows OpenSSH."""
+        if self._posix is None:
+            try:
+                r = self._exec("sh -c 'echo WINRDP_POSIX'", 15)
+                self._posix = "WINRDP_POSIX" in r.stdout
+            except Exception:  # noqa: BLE001
+                self._posix = False
+        return self._posix
+
+    def run_sh(self, script: str, timeout: int = 120) -> ExecResult:
+        """Run a POSIX shell command. Only meaningful when :meth:`is_posix` is true."""
+        if not self.is_posix():
+            raise TransportError("host has no POSIX shell (use run_ps for Windows SSH)")
+        return self._exec(f"sh -lc {shlex.quote(script)}", timeout)
 
     def run_ps(self, script: str, timeout: int = 120,
                idempotent: bool = False) -> ExecResult:
@@ -622,6 +639,8 @@ class SSHTransport(Transport):
                 pass
 
     def run_cmd(self, command: str, timeout: int = 120) -> ExecResult:
+        if self.is_posix():
+            return self.run_sh(command, timeout)
         # The SSH DefaultShell is set to PowerShell by provisioning, so a bare command
         # would run under PowerShell (wrong quoting/`$` interpolation for cmd builtins like
         # schtasks/shutdown/netsh). Force real cmd.exe semantics by invoking it explicitly.
@@ -657,10 +676,14 @@ class SSHTransport(Transport):
 
     def upload(self, data: bytes, remote_path: str, timeout: int = 300, progress=None) -> None:
         # Ensure parent dir, then SFTP the bytes — far faster than base64 chunking.
-        self.run_ps(
-            f"$d=Split-Path {ps.ps_string(remote_path)} -Parent;"
-            "if($d -and -not(Test-Path $d)){New-Item -ItemType Directory -Path $d -Force|Out-Null}"
-        ).raise_for_status("mkdir for upload")
+        if self.is_posix():
+            parent = remote_path.rsplit("/", 1)[0] if "/" in remote_path else "."
+            self.run_sh(f"mkdir -p {shlex.quote(parent)}", timeout=30)
+        else:
+            self.run_ps(
+                f"$d=Split-Path {ps.ps_string(remote_path)} -Parent;"
+                "if($d -and -not(Test-Path $d)){New-Item -ItemType Directory -Path $d -Force|Out-Null}"
+            ).raise_for_status("mkdir for upload")
         with self._oplock:
             sftp = self._client.open_sftp()
             try:
@@ -684,8 +707,10 @@ class SSHTransport(Transport):
                 sftp.close()
 
     def probe(self) -> bool:
+        if self.is_posix():
+            return True
         try:
-            return self.run_ps("$true", timeout=15).ok
+            return self.run_ps("$true", timeout=15, idempotent=True).ok
         except Exception:
             return False
 
