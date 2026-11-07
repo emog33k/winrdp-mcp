@@ -91,8 +91,9 @@ def _sendkeys_escape(text: str) -> str:
 
 
 def register(mcp, ctx) -> None:
-    def _json_as_user(body: str, host, timeout=90):
-        r = ctx.exec_ps(ps.wrap_json(body), host=host, as_user=True, timeout=timeout)
+    def _json_as_user(body: str, host, timeout=90, session_id=None):
+        r = ctx.exec_ps(ps.wrap_json(body), host=host, as_user=True, session_id=session_id,
+                        timeout=timeout)
         return ps.parse_json(r.stdout)
 
     # ------------------------------------------------------------------ windows
@@ -242,19 +243,22 @@ def register(mcp, ctx) -> None:
 
     # ------------------------------------------------------------------ batch
     @mcp.tool
-    def gui_script(script: str, host: Optional[str] = None, timeout: int = 180) -> ExecResult:
+    def gui_script(script: str, host: Optional[str] = None, timeout: int = 180,
+                   session_id: Optional[int] = None) -> ExecResult:
         """Run a PowerShell block in the interactive session with GUI helpers pre-loaded —
         the one-call way to do a multi-step GUI sequence without paying per-action latency.
 
         Pre-loaded: System.Windows.Forms (SendKeys), the [WinRDPMouse] class
         (SetCursorPos + mouse_event with LDOWN/LUP/RDOWN/RUP/MDOWN/MUP consts), and
         UIAutomationClient/Types. Your script's last expression is returned as text.
+        `session_id` picks a session on a multi-session host.
         """
         preload = (
             "Add-Type -AssemblyName System.Windows.Forms,UIAutomationClient,UIAutomationTypes;"
             + _MOUSE_TYPE
         )
-        r = ctx.exec_ps(preload + script, host=host, as_user=True, timeout=timeout)
+        r = ctx.exec_ps(preload + script, host=host, as_user=True, session_id=session_id,
+                        timeout=timeout)
         return {"stdout": r.stdout, "stderr": r.stderr, "rc": r.rc}
 
     # ------------------------------------------------------------------ drag
@@ -297,20 +301,23 @@ def register(mcp, ctx) -> None:
 
     # ------------------------------------------------------------------ OCR / vision-lite
     @mcp.tool
-    def ocr_screen(host: Optional[str] = None) -> dict:
+    def ocr_screen(host: Optional[str] = None, session_id: Optional[int] = None) -> dict:
         """Read text off the live desktop via the built-in Windows OCR engine (Win10+).
         Returns the full text plus per-word screen coordinates (center x/y + bounding box).
-        Pairs with mouse_click / find_and_click. (Claude can also just read a screenshot.)"""
+        Pairs with mouse_click / find_and_click. `session_id` picks a session on a
+        multi-session host. (Claude can also just read a screenshot.)"""
         body = _CAPTURE + _OCR + (
             "$result=@{text=$ocr.Text;words=@($words)}"
         )
-        return _json_as_user(body, host, timeout=120)
+        return _json_as_user(body, host, timeout=120, session_id=session_id)
 
     @mcp.tool
     def find_and_click(text: str, host: Optional[str] = None, button: str = "left",
-                       double: bool = False, occurrence: int = 1) -> dict:
+                       double: bool = False, occurrence: int = 1,
+                       session_id: Optional[int] = None) -> dict:
         """OCR the desktop, find on-screen `text`, and click its center — vision-lite
-        clicking for UIs that UI Automation can't see. occurrence picks the Nth match."""
+        clicking for UIs that UI Automation can't see. occurrence picks the Nth match;
+        `session_id` picks a session on a multi-session host."""
         if button not in _BTN:
             return {"error": "button must be left|right|middle"}
         down, up = _BTN[button]
@@ -324,17 +331,17 @@ def register(mcp, ctx) -> None:
             + clicks +
             "$result=@{ok=$true;text=$t.text;x=$t.x;y=$t.y}}"
         )
-        return _json_as_user(body, host, timeout=120)
+        return _json_as_user(body, host, timeout=120, session_id=session_id)
 
     # ------------------------------------------------------------------ record
     @mcp.tool
     def record_screen(host: Optional[str] = None, seconds: int = 5, fps: int = 4,
-                      max_width: int = 960):
+                      max_width: int = 960, session_id: Optional[int] = None):
         """Record the desktop for a few seconds and return it as an animated GIF.
 
         Requires a connected interactive session. Frames are downscaled to `max_width` and
         the GIF is shipped base64 over WinRM, so keep it short (a long/large recording can
-        exceed transport limits)."""
+        exceed transport limits). `session_id` picks a session on a multi-session host."""
         frames = max(1, min(int(seconds) * max(1, int(fps)), 60))
         delay_ms = int(1000 / max(1, int(fps)))
         cs = max(1, delay_ms // 10)
@@ -364,7 +371,8 @@ def register(mcp, ctx) -> None:
             "Remove-Item $out -Force -ErrorAction SilentlyContinue;"
             "[Convert]::ToBase64String($bytes)"
         )
-        r = ctx.exec_ps(script, host=host, as_user=True, timeout=max(90, frames * 2 + 60))
+        r = ctx.exec_ps(script, host=host, as_user=True, session_id=session_id,
+                        timeout=max(90, frames * 2 + 60))
         import base64
         b64 = "".join(ln.strip() for ln in r.stdout.splitlines() if ln.strip())
         if not b64:

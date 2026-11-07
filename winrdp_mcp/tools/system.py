@@ -14,6 +14,14 @@ except Exception:  # pragma: no cover
     Image = None
 
 
+def _clip(text: str, limit: int) -> tuple[str, bool]:
+    """Server-side output cap. limit<=0 means unlimited."""
+    if limit <= 0 or len(text) <= limit:
+        return text, False
+    return (text[:limit] + f"\n... [truncated {len(text) - limit} chars; "
+                           "pass max_output=0 for the full output]", True)
+
+
 def register(mcp, ctx) -> None:
     @mcp.tool
     def run_powershell(
@@ -25,6 +33,8 @@ def register(mcp, ctx) -> None:
         loopback: bool = False,
         timeout: int = 120,
         kill_on_timeout: bool = False,
+        session_id: Optional[int] = None,
+        max_output: int = 0,
     ) -> dict:
         """Run a PowerShell script on a box. The universal escape hatch — anything
         Windows can do, this can do.
@@ -52,14 +62,24 @@ def register(mcp, ctx) -> None:
         the call with rc=1 instead of being silently ignored. Add `-ErrorAction
         SilentlyContinue` at the cmdlet that is allowed to miss.
 
-        Returns {stdout, stderr, rc}.
+        as_user=True additionally accepts `session_id` (from test_host's session step or
+        qwinsta) to pick a specific interactive session; without it the first Active session
+        is used.
+
+        `max_output` caps stdout/stderr server-side (0 = no cap). The MCP client may impose
+        its own limit; when this cap fires, `truncated` is true.
+
+        Returns {stdout, stderr, rc, truncated}.
         """
         if detach:
             return ctx.run_detached(script, host=host)
         r = ctx.exec_ps(script, host=host, elevated=elevated, as_user=as_user,
-                        loopback=loopback, timeout=timeout, kill_on_timeout=kill_on_timeout,
-                        wrap=True)
-        return {"stdout": r.stdout, "stderr": r.stderr, "rc": r.rc}
+                        session_id=session_id, loopback=loopback, timeout=timeout,
+                        kill_on_timeout=kill_on_timeout, wrap=True)
+        out, cut_out = _clip(r.stdout, max_output)
+        err, cut_err = _clip(r.stderr, max_output)
+        return {"stdout": out, "stderr": err, "rc": r.rc,
+                "truncated": cut_out or cut_err}
 
     @mcp.tool
     def run_cmd(command: str, host: Optional[str] = None, timeout: int = 120) -> ExecResult:
@@ -139,11 +159,13 @@ def register(mcp, ctx) -> None:
         return ps.as_list(ctx.exec_json(body, host=host))
 
     @mcp.tool
-    def screenshot(host: Optional[str] = None, monitor: int = 0):
+    def screenshot(host: Optional[str] = None, monitor: int = 0,
+                   session_id: Optional[int] = None):
         """Capture the interactive RDP desktop of a box and return it as an image.
 
         Runs inside the logged-on user's session so it sees the real desktop. Requires an
-        active/connected RDP session on the box.
+        active/connected RDP session on the box; `session_id` picks one on a multi-session
+        host (omit it for the first Active session).
         """
         cap = (
             "Add-Type -AssemblyName System.Windows.Forms,System.Drawing;"
@@ -155,7 +177,7 @@ def register(mcp, ctx) -> None:
             "$bmp.Save($ms,[Drawing.Imaging.ImageFormat]::Png);"
             "[Convert]::ToBase64String($ms.ToArray())"
         )
-        r = ctx.exec_ps(cap, host=host, as_user=True, timeout=60)
+        r = ctx.exec_ps(cap, host=host, as_user=True, session_id=session_id, timeout=60)
         b64 = "".join(ln.strip() for ln in r.stdout.splitlines() if ln.strip())
         if not b64:
             return {"error": "no image captured (is an RDP session connected?)", "stderr": r.stderr}

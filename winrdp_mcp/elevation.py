@@ -63,6 +63,53 @@ ACTIVE_SESSION_PROBE_PS = (
     "else{" + _HOME_FALLBACK_PS + "}"
 )
 
+# Windows Home boxes may lack qwinsta. Fall back to the console user confirmed by an
+# explorer.exe owned by that user, and expose it as a synthetic console row.
+_HOME_FALLBACK_ROWS_PS = (
+    "$u=[string](Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).UserName;"
+    "if($u){$leaf=($u -split '\\')[-1];$found=$false;"
+    "$shells=@(Get-CimInstance Win32_Process -Filter \"Name='explorer.exe'\" "
+    "-ErrorAction SilentlyContinue);"
+    "foreach($p in $shells){"
+    "$o=Invoke-CimMethod -InputObject $p -MethodName GetOwner -ErrorAction SilentlyContinue;"
+    "if($o){$full=if($o.Domain){$o.Domain+'\\'+$o.User}else{$o.User};"
+    "if(($full -ieq $u)-or($o.User -ieq $leaf)){$found=$true;break}}};"
+    "if($found){$rows=@(@{session='console';user=$u;id='';state='Active';active=$true});"
+    "$active=$true;$console=$true}}"
+)
+
+# Structured session list for session selection (same header slicing as above).
+SESSIONS_PS = (
+    "$active=$false;$console=$false;$rows=@();"
+    "$q=Get-Command qwinsta -ErrorAction SilentlyContinue;"
+    "if($q){$lines=@(& $q.Source 2>$null);"
+    "if($lines.Count -ge 1){$h=[string]$lines[0];"
+    "$iS=$h.IndexOf('SESSIONNAME');$iU=$h.IndexOf('USERNAME');"
+    "$iI=$h.IndexOf('ID');$iT=$h.IndexOf('STATE');"
+    "if($iS -ge 0 -and $iU -gt $iS -and $iI -gt $iU -and $iT -gt $iI){"
+    "foreach($l in ($lines|Select-Object -Skip 1)){"
+    "if($l.Length -le $iT){continue};"
+    "$nm=$l.Substring($iS,$iU-$iS).Trim().TrimStart([char]'>');"
+    "$u=$l.Substring($iU,$iI-$iU).Trim();"
+    "$id=$l.Substring($iI,$iT-$iI).Trim();"
+    "$st=($l.Substring($iT).Trim() -split '\\s+')[0];"
+    "$a=($u -and $st -ieq 'Active');"
+    "if($nm -ieq 'console'){$console=$true};"
+    "if($a){$active=$true};"
+    "$rows+=@{session=$nm;user=$u;id=$id;state=$st;active=$a}}}}"
+    "}else{" + _HOME_FALLBACK_ROWS_PS + "};"
+    "$result=@{active=$active;console=$console;rows=@($rows)}"
+)
+
+
+def list_sessions(transport: Transport) -> dict:
+    """Return {active, console, rows:[{session,user,id,state,active}]} from qwinsta."""
+    r = transport.run_ps(ps.wrap_json(SESSIONS_PS), timeout=30, idempotent=True)
+    data = ps.parse_json(r.stdout)
+    if not isinstance(data, dict) or "error" in data:
+        raise TransportError((data or {}).get("error") or "could not read interactive sessions")
+    return data
+
 
 @dataclass
 class ElevatedResult:
@@ -270,11 +317,18 @@ def _safe_read(transport: Transport, path: str) -> str:
     return r.stdout
 
 
-def run_in_user_session(transport: Transport, script: str, *, timeout: int = 120) -> ExecResult:
-    """Run ``script`` inside the active interactive user's session (for GUI work).
+def run_in_user_session(transport: Transport, script: str, *, timeout: int = 120,
+                        session_id: Optional[int] = None) -> ExecResult:
+    """Run ``script`` inside an interactive user's session (for GUI work).
 
-    Uses a Scheduled Task bound to the console user with an interactive logon so the
-    process attaches to the visible desktop. Output capture is best-effort.
+    Uses a Scheduled Task bound to that user with an interactive logon so the process
+    attaches to the visible desktop. ``session_id`` selects a row from
+    :func:`list_sessions`; without it the first Active session is used. A disconnected
+    session has no composed desktop and fails with an actionable message.
+
+    Limitation: Task Scheduler binds to the USER, not to a session id — if the same user
+    has several interactive sessions the OS picks one. True per-session pinning needs
+    CreateProcessAsUser.
     """
     rid = _rid()
     task = f"winrdp_ui_{rid}"
@@ -282,20 +336,35 @@ def run_in_user_session(transport: Transport, script: str, *, timeout: int = 120
     out_f = f"{REMOTE_TMP}\\{task}.out"
     done_f = f"{REMOTE_TMP}\\{task}.done"
 
-    # Discover an ACTIVE interactive session (GUI/desktop ops need a connected session; a
-    # Disconnected RDP session has no composed desktop, so fail with an actionable message).
-    who = transport.run_ps(ACTIVE_SESSION_PROBE_PS, timeout=30)
-    line = (who.stdout or "").strip().splitlines()[-1].strip() if who.stdout.strip() else "NONE"
-    if line.startswith("ACTIVE:"):
-        user = line[len("ACTIVE:"):]
-    elif line.startswith("DISC:"):
-        raise TransportError(
-            f"the interactive session for '{line[len('DISC:'):]}' is Disconnected — GUI / as_user "
-            "ops need a connected desktop. Reconnect RDP, or call "
-            "rdp_connect_to_console(session_id) to move the session to the console (which "
-            "composes the desktop).")
+    rows = [r for r in (list_sessions(transport).get("rows") or []) if r.get("user")]
+    if session_id is not None:
+        match = [r for r in rows if str(r.get("id")) == str(session_id)]
+        if not match:
+            available = ", ".join(
+                f"{r.get('id')}:{r.get('user')}:{r.get('state')}" for r in rows) or "none"
+            raise TransportError(
+                f"session {session_id} not found; available sessions: {available}")
+        chosen = match[0]
+        if not chosen.get("active"):
+            raise TransportError(
+                f"session {session_id} ({chosen.get('user')}) is {chosen.get('state')} — "
+                "GUI / as_user ops need an Active session. Reconnect RDP, or call "
+                "rdp_connect_to_console(session_id) to move it to the console.")
     else:
-        raise TransportError("no interactive user session on the box for GUI / as_user ops")
+        active = [r for r in rows if r.get("active")]
+        if active:
+            chosen = active[0]
+        else:
+            disc = [r for r in rows
+                    if str(r.get("state", "")).lower().startswith(("disc", "откл"))]
+            if disc:
+                raise TransportError(
+                    f"the interactive session for '{disc[0].get('user')}' is Disconnected — "
+                    "GUI / as_user ops need a connected desktop. Reconnect RDP, or call "
+                    "rdp_connect_to_console(session_id) to move the session to the console "
+                    "(which composes the desktop).")
+            raise TransportError("no interactive user session on the box for GUI / as_user ops")
+    user = chosen["user"]
 
     wrapper = (
         "[Console]::OutputEncoding=[Text.Encoding]::UTF8;"

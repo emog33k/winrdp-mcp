@@ -209,9 +209,11 @@ def register(mcp, ctx) -> None:
 
     @mcp.tool
     def start_process(command: str, host: Optional[str] = None, elevated: bool = False,
-                      as_user: bool = False, wait: bool = False, detach: bool = False) -> dict:
+                      as_user: bool = False, wait: bool = False, detach: bool = False,
+                      session_id: Optional[int] = None) -> dict:
         """Launch a program/command on a box. elevated=True for full token, as_user=True
-        to launch in the interactive RDP desktop session.
+        to launch in the interactive RDP desktop session (session_id picks one on a
+        multi-session host).
 
         detach=True launches it via a Scheduled Task so it SURVIVES the session close (a
         normal launch dies with the WinRM Job Object) and gets loopback access — use this
@@ -222,7 +224,8 @@ def register(mcp, ctx) -> None:
         if detach:
             return ctx.run_detached(f"& $env:ComSpec /c {ps.ps_string(command)}", host=host)
         if wait:
-            r = ctx.exec_ps(command, host=host, elevated=elevated, as_user=as_user, timeout=300)
+            r = ctx.exec_ps(command, host=host, elevated=elevated, as_user=as_user,
+                            session_id=session_id, timeout=300)
             return {"stdout": r.stdout, "stderr": r.stderr, "rc": r.rc}
         rid = binascii.hexlify(os.urandom(5)).decode()
         out = f"{REMOTE_TMP}\\proc_{rid}.out"
@@ -233,7 +236,8 @@ def register(mcp, ctx) -> None:
             f"-WindowStyle Hidden -PassThru -RedirectStandardOutput {ps.ps_string(out)} "
             f"-RedirectStandardError {ps.ps_string(err)};Write-Output $p.Id"
         )
-        r = ctx.exec_ps(launch, host=host, elevated=elevated, as_user=as_user, timeout=60)
+        r = ctx.exec_ps(launch, host=host, elevated=elevated, as_user=as_user,
+                        session_id=session_id, timeout=60)
         pid = (r.stdout or "").strip().splitlines()[-1].strip() if r.stdout.strip() else None
         return {"pid": pid, "stdout_log": out, "stderr_log": err,
                 "note": "background process launched; read stdout_log/stderr_log with tail_file",

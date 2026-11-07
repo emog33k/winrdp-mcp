@@ -47,28 +47,9 @@ _INFO_PS = (
     "build=if($os){[string]$os.BuildNumber}else{$null}}"
 )
 
-# Active vs console, parsed with the same fixed-width header slicing as
-# elevation.ACTIVE_SESSION_PROBE_PS. A console row counts even without a logged-on user:
-# the box is healthy, only GUI (as_user/screenshot) is unavailable.
-_SESSION_PS = (
-    "$active=$false;$console=$false;$rows=@();"
-    "$q=Get-Command qwinsta -ErrorAction SilentlyContinue;"
-    "if($q){$lines=@(& $q.Source 2>$null);"
-    "if($lines.Count -ge 1){$h=[string]$lines[0];"
-    "$iS=$h.IndexOf('SESSIONNAME');$iU=$h.IndexOf('USERNAME');"
-    "$iI=$h.IndexOf('ID');$iT=$h.IndexOf('STATE');"
-    "if($iS -ge 0 -and $iU -gt $iS -and $iI -gt $iU -and $iT -gt $iI){"
-    "foreach($l in ($lines|Select-Object -Skip 1)){"
-    "if($l.Length -le $iT){continue};"
-    "$nm=$l.Substring($iS,$iU-$iS).Trim().TrimStart([char]'>');"
-    "$u=$l.Substring($iU,$iI-$iU).Trim();"
-    "$st=($l.Substring($iT).Trim() -split '\\s+')[0];"
-    "if($nm -ieq 'console'){$console=$true};"
-    "if($u -and $st -ieq 'Active'){$active=$true};"
-    "$rows+=@{session=$nm;user=$u;state=$st}}}}};"
-    "$result=@{active=$active;console=$console;rows=@($rows)}"
-)
-
+# Active vs console comes from elevation.SESSIONS_PS (the same parser session selection
+# uses). A console row counts even without a logged-on user: the box is healthy, only GUI
+# (as_user/screenshot) is unavailable.
 _ELEV_PS = (
     "$id=[Security.Principal.WindowsIdentity]::GetCurrent();"
     "$pr=New-Object Security.Principal.WindowsPrincipal($id);"
@@ -156,7 +137,7 @@ def check_health(transport: Transport, *, expected_name: Optional[str] = None,
         steps.append(_step("elevation", False, f"{type(e).__name__}: {e}"))
 
     try:
-        sess = _parse(transport, _SESSION_PS, timeout)
+        sess = _parse(transport, elevation.SESSIONS_PS, timeout)
         active = sess.get("active") is True
         console = sess.get("console") is True
         caps = {"as_user": active, "screenshot": active, "gui": active}

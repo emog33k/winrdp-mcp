@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import os
+import threading
+import time
 
 from fastmcp import FastMCP
 
-from . import __version__, log, prompts, resources, toolsets
+from . import __version__, config, log, prompts, resources, toolsets
 from .context import Context
 from .tools import register_all
 from .vault import Host
@@ -135,6 +138,56 @@ def _csv_env(key: str) -> set[str]:
     return {p.strip() for p in raw.split(",") if p.strip()}
 
 
+_audit_lock = threading.Lock()
+
+
+def _audit_write(tool: str, host, ok: bool, ms: float, error: str | None) -> None:
+    """Append one JSONL record per tool call. Args are NOT logged (they can hold secrets)."""
+    line = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "tool": tool,
+        "host": str(host) if host else None,
+        "ok": ok,
+        "duration_ms": round(ms, 1),
+        "error": log.redact(error) if error else None,
+    }
+    try:
+        with _audit_lock:
+            with open(config.data_dir() / "audit.log", "a", encoding="utf-8") as f:
+                f.write(json.dumps(line, ensure_ascii=False) + "\n")
+    except Exception as e:  # noqa: BLE001 — auditing must never break a tool call
+        _log.debug("audit write failed: %s", e)
+
+
+def _install_audit_middleware(mcp: FastMCP) -> None:
+    """Per-call audit log (JSONL under the data dir). WINRDP_AUDIT_LOG=0 disables it."""
+    if os.environ.get("WINRDP_AUDIT_LOG", "").strip().lower() in ("0", "false", "off", "no"):
+        return
+    try:
+        from fastmcp.server.middleware import Middleware
+    except Exception:  # pragma: no cover — older FastMCP without middleware
+        _log.warning("audit log unavailable: this FastMCP lacks middleware")
+        return
+
+    class Audit(Middleware):
+        async def on_call_tool(self, context, call_next):
+            name = getattr(context.message, "name", "")
+            args = getattr(context.message, "arguments", None) or {}
+            host = args.get("host") if isinstance(args, dict) else None
+            started = time.time()
+            ok, err = True, None
+            try:
+                return await call_next(context)
+            except Exception as e:
+                ok, err = False, f"{type(e).__name__}: {e}"
+                raise
+            finally:
+                _audit_write(name, host, ok, (time.time() - started) * 1000, err)
+
+    mcp.add_middleware(Audit())
+    _log.info("per-call audit log enabled (%s)", config.data_dir() / "audit.log")
+
+
 def _install_confirm_middleware(mcp: FastMCP, destructive: set[str]) -> None:
     """Opt-in server-side confirmation for destructive tools (MCP 2026 elicitation).
 
@@ -218,6 +271,7 @@ def build_server(*, local: bool = False, seed_host: Host | None = None,
 
     mcp = FastMCP("winrdp-mcp", instructions=INSTRUCTIONS)
     _install_tool_wrapper(mcp)
+    _install_audit_middleware(mcp)
     if os.environ.get("WINRDP_CONFIRM_DESTRUCTIVE", "").strip() in ("1", "true", "yes", "on"):
         _install_confirm_middleware(mcp, DESTRUCTIVE)
 

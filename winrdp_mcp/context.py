@@ -100,6 +100,7 @@ class Context:
         wrap: bool = False,
         elevated: bool = False,
         as_user: bool = False,
+        session_id: Optional[int] = None,
         loopback: bool = False,
         timeout: int = 120,
         progress=None,
@@ -112,10 +113,14 @@ class Context:
         if kill_on_timeout and as_user:
             raise ValueError("kill_on_timeout is not supported with as_user=True; cancel an "
                              "interactive-session job with task_stop instead")
+        if session_id is not None and not as_user:
+            raise ValueError("session_id only applies with as_user=True (it selects the "
+                             "interactive session to run in)")
         start = time.time()
         try:
             if as_user:
-                r = elevation.run_in_user_session(t, script, timeout=timeout)
+                r = elevation.run_in_user_session(t, script, timeout=timeout,
+                                                  session_id=session_id)
                 return r
             # loopback=True forces the Scheduled Task path even when the WinRM session is
             # already elevated: the network-logon token blocks outbound 127.0.0.1, but the

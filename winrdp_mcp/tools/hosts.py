@@ -59,16 +59,34 @@ def register(mcp, ctx) -> None:
             tags=[t.strip() for t in tags.split(",") if t.strip()],
             expected_name=expected_name.strip(),
         )
+        same_host = [x.alias for x in ctx.vault.all()
+                     if x.alias != alias and x.host == host]
         ctx.vault.add(h, make_active=make_active)
         ctx.invalidate(alias)
-        return {"added": alias, "active": ctx.vault.active.alias if ctx.vault.active else None}
+        out = {"added": alias, "active": ctx.vault.active.alias if ctx.vault.active else None}
+        if same_host:
+            out["aliases_for_same_host"] = same_host
+            out["warning"] = (
+                f"{host} is already registered as {', '.join(same_host)}; a command aimed at "
+                "the wrong alias hits the same box. Set expected_name so test_host verifies "
+                "the computer name.")
+        return out
 
     @mcp.tool
     def list_hosts() -> dict:
-        """List all registered boxes (passwords redacted) and which one is active."""
+        """List all registered boxes (passwords redacted) and which one is active.
+
+        `duplicate_hosts` maps one address to every alias pointing at it — a guard against
+        firing a command at the wrong name on a many-aliases-one-box inventory.
+        """
+        hosts = ctx.vault.all()
+        by_host: dict = {}
+        for h in hosts:
+            by_host.setdefault(h.host, []).append(h.alias)
         return {
             "active": ctx.vault.active.alias if ctx.vault.active else None,
-            "hosts": [h.redacted() for h in ctx.vault.all()],
+            "hosts": [h.redacted() for h in hosts],
+            "duplicate_hosts": {k: v for k, v in by_host.items() if len(v) > 1},
         }
 
     @mcp.tool

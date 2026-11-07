@@ -76,10 +76,15 @@ class _InteractiveTransport:
         self.uploads = []
         self.register_script = ""
 
-    def run_ps(self, script, timeout=120):
+    def run_ps(self, script, timeout=120, idempotent=False):
         self.calls.append(script)
-        if "qwinsta" in script:
-            return ExecResult("ACTIVE:admin\n", "", 0)
+        if "Get-Command qwinsta" in script:
+            import json
+            payload = {"active": True, "console": True, "rows": [
+                {"session": "console", "user": "admin", "id": "1",
+                 "state": "Active", "active": True}]}
+            return ExecResult(
+                f"{elevation.ps.BEGIN}\n{json.dumps(payload)}\n{elevation.ps.END}\n", "", 0)
         if "Register-ScheduledTask" in script:
             self.register_script = script
             return ExecResult("", "", 0)
@@ -113,10 +118,15 @@ class _HomeInteractiveTransport:
         self.uploads = []
         self.calls = []
 
-    def run_ps(self, script, timeout=120):
+    def run_ps(self, script, timeout=120, idempotent=False):
         self.calls.append(script)
         if "Get-Command qwinsta" in script:
-            return ExecResult("ACTIVE:KARASLAPTOP\\karas\n", "", 0)
+            import json
+            payload = {"active": True, "console": True, "rows": [
+                {"session": "console", "user": "KARASLAPTOP\\karas", "id": "1",
+                 "state": "Active", "active": True}]}
+            return ExecResult(
+                f"{elevation.ps.BEGIN}\n{json.dumps(payload)}\n{elevation.ps.END}\n", "", 0)
         if "Register-ScheduledTask" in script:
             self.register_script = script
             return ExecResult("", "", 0)

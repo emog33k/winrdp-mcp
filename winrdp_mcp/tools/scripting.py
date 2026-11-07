@@ -40,6 +40,7 @@ def register(mcp, ctx) -> None:
         ensure_python: bool = True,
         elevated: bool = False,
         as_user: bool = False,
+        session_id: Optional[int] = None,
         timeout: int = 600,
         kill_on_timeout: bool = False,
     ) -> dict:
@@ -102,6 +103,7 @@ def register(mcp, ctx) -> None:
         cmd = f'& {ps.ps_string(py)} {ps.ps_string(remote)} {args}'.strip()
         try:
             r = ctx.exec_ps(cmd, host=host, elevated=elevated, as_user=as_user,
+                            session_id=session_id,
                             timeout=timeout, kill_on_timeout=kill_on_timeout)
             return {"host": alias, "python": py, "stdout": r.stdout, "stderr": r.stderr,
                     "rc": r.rc}
@@ -110,7 +112,8 @@ def register(mcp, ctx) -> None:
 
     @mcp.tool
     def run_python_file(local_path: str, host: Optional[str] = None, args: str = "",
-                        pip: str = "", elevated: bool = False, timeout: int = 600,
+                        pip: str = "", elevated: bool = False,
+                        session_id: Optional[int] = None, timeout: int = 600,
                         kill_on_timeout: bool = False) -> dict:
         """Upload a .py file from the operator machine and run it ON A REMOTE BOX (the one
         named by `host`, or the active host). Only the file is read locally; execution is
@@ -118,7 +121,8 @@ def register(mcp, ctx) -> None:
         with open(local_path, "r", encoding="utf-8") as f:
             code = f.read()
         return run_python(code, host=host, args=args, pip=pip, elevated=elevated,
-                          timeout=timeout, kill_on_timeout=kill_on_timeout)
+                          session_id=session_id, timeout=timeout,
+                          kill_on_timeout=kill_on_timeout)
 
     @mcp.tool
     def pip_install(packages: str, host: Optional[str] = None, timeout: int = 600,
@@ -149,6 +153,7 @@ def register(mcp, ctx) -> None:
         args: str = "",
         elevated: bool = False,
         as_user: bool = False,
+        session_id: Optional[int] = None,
         timeout: int = 600,
         kill_on_timeout: bool = False,
     ) -> dict:
@@ -192,6 +197,7 @@ def register(mcp, ctx) -> None:
 
         if interp == "powershell":
             r = ctx.exec_ps(content, host=host, elevated=elevated, as_user=as_user,
+                            session_id=session_id,
                             timeout=timeout, kill_on_timeout=kill_on_timeout, wrap=True)
             return {"host": alias, "interpreter": interp, "stdout": r.stdout,
                     "stderr": r.stderr, "rc": r.rc}
@@ -213,6 +219,7 @@ def register(mcp, ctx) -> None:
         }[interp](remote)
         try:
             r = ctx.exec_ps(runner.strip(), host=host, elevated=elevated, as_user=as_user,
+                            session_id=session_id,
                             timeout=timeout, kill_on_timeout=kill_on_timeout)
             return {"host": alias, "interpreter": interp, "stdout": r.stdout,
                     "stderr": r.stderr, "rc": r.rc}
@@ -237,10 +244,11 @@ def register(mcp, ctx) -> None:
 
     @mcp.tool
     def run_node(code: str, host: Optional[str] = None, args: str = "", timeout: int = 300,
+                 session_id: Optional[int] = None,
                  kill_on_timeout: bool = False) -> dict:
         """Run inline Node.js code ON A REMOTE BOX (Node must be installed there)."""
         return run_script(code, interpreter="node", host=host, args=args, timeout=timeout,
-                          kill_on_timeout=kill_on_timeout)
+                          session_id=session_id, kill_on_timeout=kill_on_timeout)
 
     @mcp.tool
     def ensure_runtime(runtime: str = "python", host: Optional[str] = None, timeout: int = 900,
