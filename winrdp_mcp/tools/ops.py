@@ -13,7 +13,10 @@ def register(mcp, ctx) -> None:
     def health_report(host: Optional[str] = None) -> dict:
         """One-call box health: OS/uptime, CPU/RAM, per-disk free, top processes, stopped
         auto-start services, recent System/Application errors, pending Windows Updates, and
-        Defender status. The "how is this box doing" summary."""
+        Defender status. The "how is this box doing" summary.
+
+        Always returns `ok` and, on failure, `failed_step` + `error`, so an error is not
+        mistakable for a health payload (a wrapped script error parses to {"error": ...})."""
         body = (
             "$os=Get-CimInstance Win32_OperatingSystem;$cs=Get-CimInstance Win32_ComputerSystem;"
             "$cpu=(Get-CimInstance Win32_Processor|Measure-Object LoadPercentage -Average).Average;"
@@ -40,7 +43,16 @@ def register(mcp, ctx) -> None:
             "defender=if($def){@{realtime=$def.RealTimeProtectionEnabled;"
             "signature_age_days=$def.AntivirusSignatureAge}}else{$null}}"
         )
-        return ctx.exec_json(body, host=host, timeout=180)
+        try:
+            r = ctx.exec_json(body, host=host, timeout=180)
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "failed_step": "health_report", "error": str(e),
+                    "steps": [{"name": "health_report", "ok": False, "detail": str(e)}]}
+        if isinstance(r, dict) and "error" in r and "hostname" not in r:
+            return {"ok": False, "failed_step": "health_report", "error": r.get("error"),
+                    "steps": [{"name": "health_report", "ok": False,
+                               "detail": str(r.get("error"))}]}
+        return {"ok": True, **(r if isinstance(r, dict) else {"data": r})}
 
     @mcp.tool
     def apply_baseline(host: Optional[str] = None, timezone: Optional[str] = None,

@@ -437,13 +437,23 @@ class WinRMTransport(Transport):
                     return self._fchan
         except Exception as e:  # noqa: BLE001
             _log.debug("winrm %s: SMB channel unavailable: %s", self.host, e)
-        # 2) SFTP over SSH
+        # 2) SFTP over SSH — verify the subsystem by moving a byte, not just by connecting.
+        # Auth can succeed while sshd_config denies the sftp-server subsystem (or the account
+        # is chrooted without one); claiming "sftp (verified)" then would be a false positive.
         try:
             if port_open(self.host, SSH_PORT, timeout=2):
                 ssh = SSHTransport(self.host, usr, self._password, port=SSH_PORT)
-                self._fchan = ("sftp", ssh)
-                _log.debug("winrm %s: fast file channel = SFTP", self.host)
-                return self._fchan
+                try:
+                    if ssh.verify_sftp():
+                        self._fchan = ("sftp", ssh)
+                        _log.debug("winrm %s: fast file channel = SFTP (verified)", self.host)
+                        return self._fchan
+                except Exception as e:  # noqa: BLE001
+                    _log.debug("winrm %s: SFTP subsystem unavailable: %s", self.host, e)
+                try:
+                    ssh.close()
+                except Exception:  # noqa: BLE001
+                    pass
         except Exception as e:  # noqa: BLE001
             _log.debug("winrm %s: SFTP channel unavailable: %s", self.host, e)
         self._fchan = False
@@ -587,6 +597,23 @@ class SSHTransport(Transport):
 
     def file_channel(self) -> Optional[str]:
         return "sftp"
+
+    def verify_sftp(self) -> bool:
+        """Prove the SFTP subsystem works: open it, write a byte, remove it.
+
+        Written in the account's home directory so it needs no pre-created remote dir.
+        Raises on any failure; the fast-channel probe treats that as "no SFTP".
+        """
+        rid = binascii.hexlify(os.urandom(6)).decode()
+        name = f"winrdp_sftp_{rid}.tmp"
+        with self._oplock:
+            sftp = self._client.open_sftp()
+            try:
+                sftp.putfo(io.BytesIO(b"winrdp"), name)
+                sftp.remove(name)
+            finally:
+                sftp.close()
+        return True
 
     def upload(self, data: bytes, remote_path: str, timeout: int = 300, progress=None) -> None:
         # Ensure parent dir, then SFTP the bytes — far faster than base64 chunking.
