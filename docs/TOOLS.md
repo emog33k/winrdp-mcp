@@ -44,19 +44,19 @@ Tool visibility can be narrowed at startup: `WINRDP_ENABLED_TOOLS` (CSV allow-li
 | Hosts & Fleet | `hosts.py` | 9 | 3 | 2 | 4 |
 | Provisioning / UAC / Tooling | `provisioning.py` | 11 | 2 | 2 | 7 |
 | System | `system.py` | 8 | 4 | 2 | 2 |
-| Scripting | `scripting.py` | 6 | 0 | 0 | 6 |
+| Scripting | `scripting.py` | 7 | 0 | 0 | 7 |
 | Files | `files.py` | 21 | 7 | 1 | 13 |
-| Admin | `admin.py` | 25 | 6 | 7 | 12 |
+| Admin | `admin.py` | 27 | 8 | 7 | 12 |
 | RDP | `rdp.py` | 12 | 3 | 5 | 4 |
 | Software | `software.py` | 4 | 1 | 1 | 2 |
 | Network | `network.py` | 8 | 5 | 1 | 2 |
-| Windows | `windows.py` | 11 | 5 | 1 | 5 |
+| Windows | `windows.py` | 16 | 7 | 4 | 5 |
 | GUI | `gui.py` | 15 | 5 | 0 | 10 |
 | Waiters | `waiters.py` | 4 | 4 | 0 | 0 |
 | Scheduling | `scheduling.py` | 6 | 1 | 2 | 3 |
 | Tunnel | `tunnel.py` | 3 | 1 | 0 | 2 |
 | Ops | `ops.py` | 5 | 4 | 0 | 1 |
-| **Total** | | **148** | **51** | **24** | **73** |
+| **Total** | | **156** | **55** | **27** | **74** |
 
 ---
 
@@ -71,8 +71,10 @@ add_host(alias: str, host: str, username: str = "", password: str = "", domain: 
          transport: str = "auto", use_ssl: bool = False, winrm_auth: str = "ntlm",
          winrm_port: int = 5985, ssh_port: int = 22, rdp_port: int = 3389,
          winrm_cert_validation: str = "ignore", ssh_host_key_policy: str = "auto",
-         tags: str = "", make_active: bool = True)
+         tags: str = "", make_active: bool = True, expected_name: str = "")
 ```
+
+`expected_name` is the expected `$env:COMPUTERNAME`; `test_host`/`provision_host` fail the identity step if the box reports a different name. `add_host` also warns when another alias already points at the same address.
 
 #### `list_hosts` — read-only
 List all registered boxes (passwords redacted) and which one is active.
@@ -93,9 +95,9 @@ remove_host(alias: str)
 ```
 
 #### `test_host` — read-only
-Scan reachable management ports and verify the live transport for a box.
+Prove a box is actually healthy, not just that one command returned rc=0. Runs the full matrix (identity, principal, 64 KiB SHA-256 transfer, elevation, session, platform) and returns `{ok, failed_step, steps, capabilities}`. A failed probe invalidates the cached transport; the dead-IP control sets `ports_reliable: false` when an operator proxy makes every port look open. `expected_name` defaults to the registered value.
 ```python
-test_host(host: Optional[str] = None)
+test_host(host: Optional[str] = None, expected_name: Optional[str] = None)
 ```
 
 #### `provision_host` — mutating
@@ -143,9 +145,10 @@ list_staged_tools(host: Optional[str] = None)
 ```
 
 #### `cleanup_staged` — destructive
-Remove a staged tool by name, or wipe the whole tool cache if `name` is omitted.
+Remove a staged tool by name, or wipe the whole tool cache if `name` is omitted. Returns the manifest it covered (`target`, `count`, `bytes`, `files`); `dry_run=True` reports what would be removed without deleting.
 ```python
-cleanup_staged(name: Optional[str] = None, host: Optional[str] = None)
+cleanup_staged(name: Optional[str] = None, host: Optional[str] = None,
+               dry_run: bool = False)
 ```
 
 #### `run_elevated` — mutating
@@ -197,10 +200,13 @@ Shell execution, system facts, live performance, event log, live-desktop screens
 Run a PowerShell script on a box — the universal escape hatch. Runs **remotely**: on `host`, or on the active host (`use_host`) when omitted. `elevated=True` runs with a full unfiltered token (Scheduled Task); `as_user=True` runs inside the interactive RDP desktop session; `detach=True` launches it fire-and-forget in a Scheduled Task that survives the session close (returns the task + log paths — follow up with `task_status(task)` / `task_stop(task)`); `loopback=True` routes through a Scheduled Task so the script can reach `127.0.0.1`.
 
 `kill_on_timeout=True` kills the remote process and its children when `timeout` expires. By default a timeout only abandons the request — the script **keeps running** on the box, holding its locks. Not available with `as_user=True` (use `task_stop` there).
+
+The script runs with `$ErrorActionPreference='Stop'`, so a non-terminating error fails with rc=1. `session_id` picks an interactive session with `as_user=True`. `max_output` caps output server-side (0 = no cap) and sets `truncated`.
 ```python
 run_powershell(script: str, host: Optional[str] = None, elevated: bool = False,
                as_user: bool = False, detach: bool = False, loopback: bool = False,
-               timeout: int = 120, kill_on_timeout: bool = False)
+               timeout: int = 120, kill_on_timeout: bool = False,
+               session_id: Optional[int] = None, max_output: int = 0)
 ```
 
 #### `run_cmd` — mutating
@@ -231,7 +237,8 @@ event_log(log: str = "System", count: int = 50, level: Optional[str] = None,
 #### `screenshot` — read-only
 Capture the interactive RDP desktop of a box and return it as a PNG image (runs in the logged-on user's session; requires a connected RDP session).
 ```python
-screenshot(host: Optional[str] = None, monitor: int = 0)
+screenshot(host: Optional[str] = None, monitor: int = 0,
+           session_id: Optional[int] = None)
 ```
 
 #### `reboot` — destructive
@@ -250,7 +257,7 @@ power_action(action: str = "shutdown", host: Optional[str] = None, delay_seconds
 
 ## Scripting
 
-One-shot script execution: the runtime is located, installed on demand if missing, dependencies pip-installed, code staged and executed, and `stdout`/`stderr`/`rc` returned. All six are mutating.
+One-shot script execution: the runtime is located, installed on demand if missing, dependencies pip-installed, code staged and executed, and `stdout`/`stderr`/`rc` returned. All seven are mutating. On a POSIX SSH host, `run_sh` and `run_script(interpreter="sh"|"bash")` administer Linux/macOS.
 
 #### `run_python` — mutating
 Run inline Python code **on a remote box** — never on the operator machine. `host` names a registered box; omitting it targets the *active* host (`use_host`), so `host=None` still means remote. To execute on the operator machine, register it once with `add_host("local", "localhost", transport="local")` and pass `host="local"`. The result carries `host` (the box it ran on) and `python` (the interpreter path that ran it), so you can always tell where it executed.
@@ -259,14 +266,16 @@ Run inline Python code **on a remote box** — never on the operator machine. `h
 ```python
 run_python(code: str, host: Optional[str] = None, args: str = "", pip: str = "",
            ensure_python: bool = True, elevated: bool = False, as_user: bool = False,
-           timeout: int = 600, kill_on_timeout: bool = False)
+           session_id: Optional[int] = None, timeout: int = 600,
+           kill_on_timeout: bool = False)
 ```
 
 #### `run_python_file` — mutating
 Upload a `.py` file from the operator machine and run it on a box. Only the file is read locally; execution is remote (same host semantics as `run_python`).
 ```python
 run_python_file(local_path: str, host: Optional[str] = None, args: str = "",
-                pip: str = "", elevated: bool = False, timeout: int = 600,
+                pip: str = "", elevated: bool = False,
+                session_id: Optional[int] = None, timeout: int = 600,
                 kill_on_timeout: bool = False)
 ```
 
@@ -277,18 +286,25 @@ pip_install(packages: str, host: Optional[str] = None, timeout: int = 600)
 ```
 
 #### `run_script` — mutating
-Run a script in any interpreter **on a remote box** (same host semantics as `run_python`). `interpreter`: auto | python | node | powershell | cmd | bat | vbscript (`auto` guesses from shebang/syntax, defaulting to PowerShell).
+Run a script in any interpreter **on a remote box** (same host semantics as `run_python`). `interpreter`: auto | python | node | powershell | cmd | bat | vbscript (plus `sh`/`bash` on a POSIX SSH host). `auto` guesses from a shebang/syntax, defaulting to PowerShell. PowerShell content runs with `$ErrorActionPreference='Stop'`.
 ```python
 run_script(content: str, interpreter: str = "auto", host: Optional[str] = None,
            args: str = "", elevated: bool = False, as_user: bool = False,
-           timeout: int = 600, kill_on_timeout: bool = False)
+           session_id: Optional[int] = None, timeout: int = 600,
+           kill_on_timeout: bool = False)
+```
+
+#### `run_sh` — mutating
+Run a POSIX shell command on a Linux/macOS SSH host (`sh -lc`). Windows hosts return a clear error — use `run_powershell`/`run_cmd` there.
+```python
+run_sh(script: str, host: Optional[str] = None, timeout: int = 600)
 ```
 
 #### `run_node` — mutating
 Run inline Node.js code on a remote box (Node must be installed there).
 ```python
 run_node(code: str, host: Optional[str] = None, args: str = "", timeout: int = 300,
-         kill_on_timeout: bool = False)
+         session_id: Optional[int] = None, kill_on_timeout: bool = False)
 ```
 
 #### `ensure_runtime` — mutating
@@ -333,7 +349,7 @@ Upload a file from the operator machine to a box. Uses the fast SMB/SFTP channel
 
 The size is checked **before any bytes move**: over the chunked fallback anything above 25 MB is refused with the measured size and a time estimate (`{ok: false, needs_confirmation: true, …}`) rather than blocking in silence; over a fast channel the ceiling is 1 GB. Override with `max_mb` (`max_mb=0` disables the check) or `force=True`. For a large file it is usually faster to let the box fetch it itself with `download_file(url, dest)`.
 
-Returns `{ok, remote_path, bytes, channel, seconds, mbps}` — `channel` is `smb`/`sftp`/`local`/`chunked`, so a slow upload is explainable afterwards.
+Returns `{ok, remote_path, bytes, channel, seconds, mbps, sha256, verified}` — `channel` is `smb`/`sftp`/`local`/`chunked`, so a slow upload is explainable afterwards. `ok` requires the remote SHA-256 to match (a partial write or a post-upload quarantine is a failure). Chunked uploads resume after a drop.
 ```python
 file_upload(local_path: str, remote_path: str, host: Optional[str] = None,
             max_mb: Optional[float] = None, force: bool = False)
@@ -479,6 +495,12 @@ List Windows services (name, display name, status, start mode).
 list_services(host: Optional[str] = None, filter: Optional[str] = None)
 ```
 
+#### `service_info` — read-only
+Everything about one service, including the NSSM registry `Parameters`: `AppDirectory`, `AppParameters`, `AppEnvironment`, `AppThrottle`, plus `ImagePath`, `ObjectName`, dependencies and PID — the fields `Get-Service`/`Win32_Service` do not expose.
+```python
+service_info(name: str, host: Optional[str] = None)
+```
+
 #### `service_control` — mutating
 Control a service. `action`: start | stop | restart | enable | disable | manual | auto.
 ```python
@@ -491,6 +513,13 @@ List running processes with pid, memory, and CPU seconds.
 list_processes(host: Optional[str] = None, name: Optional[str] = None, top: int = 100)
 ```
 
+#### `process_details` — read-only
+Detailed process view: parent, full command line, executable, owner, session, start time, threads/handles. `cwd`/`environment` are `null` (Win32_Process does not expose them); for a service use `service_info`.
+```python
+process_details(pid: Optional[int] = None, name: Optional[str] = None,
+                host: Optional[str] = None, top: int = 10)
+```
+
 #### `kill_process` — destructive
 Kill a process by pid or by name (all matching).
 ```python
@@ -498,10 +527,11 @@ kill_process(pid: Optional[int] = None, name: Optional[str] = None, host: Option
 ```
 
 #### `start_process` — mutating
-Launch a program/command on a box. `elevated=True` for full token, `as_user=True` to launch in the interactive RDP desktop session.
+Launch a program/command on a box. `elevated=True` for full token, `as_user=True` to launch in the interactive RDP desktop session; `session_id` picks a session on a multi-session host.
 ```python
 start_process(command: str, host: Optional[str] = None, elevated: bool = False,
-              as_user: bool = False, wait: bool = False)
+              as_user: bool = False, wait: bool = False, detach: bool = False,
+              session_id: Optional[int] = None)
 ```
 
 #### `list_tasks` — read-only
@@ -833,6 +863,38 @@ Add a path to Defender's exclusion list. Runs elevated.
 defender_exclusion_add(path: str, host: Optional[str] = None)
 ```
 
+#### `defender_exclusions` — read-only
+List Defender exclusions: paths, extensions, processes and IP addresses.
+```python
+defender_exclusions(host: Optional[str] = None)
+```
+
+#### `defender_exclusion_remove` — destructive
+Remove a Defender exclusion by `path`, `extension` or `process`. Runs elevated.
+```python
+defender_exclusion_remove(path: Optional[str] = None, extension: Optional[str] = None,
+                          process: Optional[str] = None, host: Optional[str] = None)
+```
+
+#### `defender_quarantine` — read-only
+List Defender detections and threats (quarantine history): threat name, resources, detection time, action status.
+```python
+defender_quarantine(host: Optional[str] = None)
+```
+
+#### `defender_quarantine_restore` — destructive
+Restore quarantined items via `MpCmdRun -Restore -Name <threat>` or `-All`. Runs elevated.
+```python
+defender_quarantine_restore(threat_name: str = "", host: Optional[str] = None,
+                            all_items: bool = False)
+```
+
+#### `defender_history_clear` — destructive
+Clear Defender threat history / quarantine (`Remove-MpThreat`). Checks `IsTamperProtected` first and returns a clear error instead of an opaque cmdlet failure.
+```python
+defender_history_clear(host: Optional[str] = None)
+```
+
 #### `defender_scan` — mutating
 Run a Defender scan. `scan_type`: QuickScan | FullScan. Runs elevated.
 ```python
@@ -946,19 +1008,22 @@ wait_for_window(title: str, host: Optional[str] = None, timeout: int = 60, inter
 #### `ocr_screen` — read-only
 Read text off the live desktop via the built-in Windows OCR engine (Win10+). Returns full text plus per-word screen coordinates.
 ```python
-ocr_screen(host: Optional[str] = None)
+ocr_screen(host: Optional[str] = None, session_id: Optional[int] = None)
 ```
 
 #### `find_and_click`
 OCR the desktop, find on-screen `text`, and click its center — vision-lite clicking for UIs UI Automation can't see. `occurrence` picks the Nth match.
 ```python
-find_and_click(text: str, host: Optional[str] = None, button: str = "left", double: bool = False, occurrence: int = 1)
+find_and_click(text: str, host: Optional[str] = None, button: str = "left",
+               double: bool = False, occurrence: int = 1,
+               session_id: Optional[int] = None)
 ```
 
 #### `record_screen` — read-only
 Record the desktop for a few seconds and return it as an animated GIF (frames downscaled to `max_width`). Keep it short.
 ```python
-record_screen(host: Optional[str] = None, seconds: int = 5, fps: int = 4, max_width: int = 960)
+record_screen(host: Optional[str] = None, seconds: int = 5, fps: int = 4,
+              max_width: int = 960, session_id: Optional[int] = None)
 ```
 
 ---

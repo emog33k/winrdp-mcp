@@ -10,7 +10,7 @@
 [![Platform: Windows](https://img.shields.io/badge/Target-Windows%2010%2F11%20%7C%20Server%202016--2025-0078D6.svg)](#)
 [![MCP: FastMCP](https://img.shields.io/badge/MCP-FastMCP-6E56CF.svg)](https://github.com/jlowin/fastmcp)
 
-You give it a host and admin credentials. It makes the box remotely manageable *by itself* — turning on WinRM, opening the Windows firewall, and fixing local-admin token filtering — regardless of the box's starting state or Windows version. Claude then gets **147 tools**: shell, files, registry, services, processes, scheduled tasks, users, firewall, event logs, software, networking, live RDP control, screenshots, GUI automation, real UAC elevation, one-call health/security reports, and on-demand tool staging — plus **6 guided workflows** (prompts) and **live host resources**.
+You give it a host and admin credentials. It makes the box remotely manageable *by itself* — turning on WinRM, opening the Windows firewall, and fixing local-admin token filtering — regardless of the box's starting state or Windows version. Claude then gets **156 tools**: shell, files, registry, services, processes, scheduled tasks, users, firewall, event logs, software, networking, live RDP control, screenshots, GUI automation, real UAC elevation, one-call health/security reports, and on-demand tool staging — plus **6 guided workflows** (prompts) and **live host resources**. Linux/macOS hosts are administered over SSH (`run_sh`, `run_script(interpreter="sh")`).
 
 **Nothing is pre-installed on the target.** The controller reaches boxes over WinRM / SSH / SMB from wherever Claude Code runs, and manages one box or a whole fleet from a single server.
 
@@ -121,20 +121,20 @@ If the box has only RDP open, `provision_host` returns a `bootstrap_oneliner` to
 | **Hosts & Fleet** | `hosts.py` | 9 | `add_host`, `list_hosts`, `use_host`, `remove_host`, `test_host`, `diagnose_host`, `provision_host`, `run_on_hosts` (parallel fan-out), `reboot_and_wait` |
 | **Provisioning / UAC / Tooling** | `provisioning.py` | 11 | `enable_winrm`, `enable_ssh`, `run_elevated`, `uac_get`/`uac_set`, `stage_tool`, `stage_script`, `list_staged_tools`, `cleanup_staged`, `deploy_ui_agent`, `rdp_bootstrap` |
 | **System** | `system.py` | 8 | `run_powershell`, `run_cmd`, `system_info`, `performance`, `event_log`, `screenshot`, `reboot`, `power_action` |
-| **Scripting** | `scripting.py` | 6 | `run_python`, `run_python_file`, `pip_install`, `run_script` (auto-interpreter), `run_node`, `ensure_runtime` |
+| **Scripting** | `scripting.py` | 7 | `run_python`, `run_python_file`, `pip_install`, `run_script` (auto-interpreter, incl. sh/bash on Linux), `run_node`, `run_sh`, `ensure_runtime` |
 | **Files** | `files.py` | 21 | list/read/write/search/upload/download/delete, `make_dir`, copy/move, `file_hash`, zip/unzip, ACL, `download_file`, `tail_file`, `edit_file`, `sync_folder`, `transfer_between_hosts` |
-| **Admin** | `admin.py` | 25 | registry, services (`service_control`/`service_create`/`service_delete`), processes, scheduled tasks, users/groups, firewall, clipboard, event-log write/clear |
+| **Admin** | `admin.py` | 27 | registry, services (`service_control`/`service_info`/`service_create`/`service_delete`), processes (`list_processes`/`process_details`), scheduled tasks, users/groups, firewall, clipboard, event-log write/clear |
 | **RDP** | `rdp.py` | 12 | `rdp_status`/`rdp_enable`/`rdp_disable`/`rdp_set_port`, sessions, disconnect/logoff, `rdp_connect_to_console` (tscon), `rdp_connection_file`, `rdp_open`, `install_rdp_wrapper`, `rdp_allow_multiple_sessions` |
 | **Software** | `software.py` | 4 | `install_software` (winget/choco/MSI/EXE-url), `uninstall_software`, `list_installed_software`, `ensure_package_manager` |
 | **Network** | `network.py` | 8 | `net_info`, `ping`, `port_check`, `net_connections`, `port_proxy_add`/`list`/`delete` (tunneling), `set_dns` |
-| **Windows** | `windows.py` | 11 | `cim_query` (any WQL), `windows_features`, `windows_update`, `hotfixes`, Defender (`status`/`realtime`/`exclusion_add`/`scan`), `env_get`/`env_set`, `list_startup` |
+| **Windows** | `windows.py` | 16 | `cim_query` (any WQL), `windows_features`, `windows_update`, `hotfixes`, Defender (`status`/`realtime`/`exclusions`/`exclusion_add`/`exclusion_remove`/`quarantine`/`quarantine_restore`/`history_clear`/`scan`), `env_get`/`env_set`, `list_startup` |
 | **GUI** | `gui.py` | 15 | windows/keyboard/mouse (`send_keys`, `type_text`, `mouse_click`, `mouse_drag`), UI Automation (`ui_find`/`ui_invoke`/`ui_set_text`), `ocr_screen`, `find_and_click`, `wait_for_window`, `record_screen`, `gui_script` |
 | **Waiters** | `waiters.py` | 4 | `wait_for_port`, `wait_for_service`, `wait_for_process`, `wait_for_file` — block until a condition holds |
 | **Scheduling** | `scheduling.py` | 6 | `schedule_command`, `run_at_startup`, `persist_as_service` (NSSM auto-restart), `unpersist_service`, `task_status` (is a detached job alive / what did it exit with), `task_stop` |
 | **Tunnel** | `tunnel.py` | 3 | `port_forward`, `port_forward_stop`, `port_forward_list` — SSH local-forward a box's service to your machine |
 | **Ops** | `ops.py` | 5 | `health_report`, `apply_baseline`, `whoami_priv`, `failed_logons`, `list_open_ports` — one-call health & security reads |
 
-Safety classification across all 148: **51 read-only**, **24 destructive**, **73 mutating**. Read-only tools are safe to auto-run; destructive tools carry `destructiveHint=True` so clients gate them behind confirmation.
+Safety classification across all 156: **55 read-only**, **27 destructive**, **74 mutating**. Read-only tools are safe to auto-run; destructive tools carry `destructiveHint=True` so clients gate them behind confirmation.
 
 ### Prompts & resources
 

@@ -3,6 +3,53 @@
 All notable changes to winrdp-mcp are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses semantic versioning.
 
+## [0.1.11] — 2026-11-07
+
+Health checks that tell the truth, safe timeouts, full Defender/quarantine
+management, service/process detail, and Linux/macOS over SSH.
+
+### Added
+- **Real health matrix** (`health.py`): identity (expected computer name), principal
+  (High/System integrity + LocalAccountTokenFilterPolicy read back), a 64 KiB
+  SHA-256 transfer (chunked is a warning, not success), the same one-shot Scheduled
+  Task path as `run_powershell(elevated=True)`, session availability and platform.
+  `test_host` returns `ok`/`failed_step`/`steps`/`capabilities`, flags an
+  intercepting operator proxy with the dead-IP control (`ports_reliable`), and
+  invalidates a failed cached transport.
+- `expected_name` on `add_host` / `Host`; a mismatched computer name fails identity.
+- `process_details` (parent, full command line, executable, owner, session, start
+  time) and `service_info` (NSSM `AppDirectory`/`AppParameters`/`AppEnvironment`,
+  `ImagePath`, dependencies).
+- Defender: `defender_exclusions`, `defender_exclusion_remove`,
+  `defender_quarantine` (detections + threats), `defender_quarantine_restore`
+  (`MpCmdRun -Restore`), `defender_history_clear` with an explicit Tamper
+  Protection check.
+- `run_sh`, `run_script(interpreter=sh|bash)`, POSIX shebang detection, and
+  POSIX health. `SSHTransport` detects a POSIX shell, so a Linux/macOS host no
+  longer reports "No working transport"; `run_python`/`pip_install` use python3
+  (with optional `sudo -n`).
+- `session_id` on PowerShell/Python/script/process/GUI tools to pick a specific
+  interactive session on a multi-session host.
+- Per-call audit log (JSONL in the data dir; `WINRDP_AUDIT_LOG=0` disables).
+- `cleanup_staged(dry_run=True)` returns the manifest it would remove.
+- `run_powershell(max_output=N)` caps output server-side and reports `truncated`.
+
+### Changed
+- `add_host` warns when another alias already points at the same address;
+  `list_hosts` exposes `duplicate_hosts`.
+- `provision_host.success` now requires principal + hardening + transfer; a partial
+  success no longer persists `resolved_transport` as a health claim. `HARDEN_PS`
+  reads `LocalAccountTokenFilterPolicy` back and exits 1 on mismatch. The SFTP fast
+  channel is verified by a real write, not just a connection.
+
+### Fixed
+- `run_ps` no longer retries a mutating script by default: a recoverable timeout
+  used to re-run it (two hung `powershell.exe`). Reads opt in explicitly.
+- `run_powershell` / `run_script(powershell)` apply `$ErrorActionPreference='Stop'`,
+  so a non-terminating error fails with rc=1 instead of rc=0.
+- Chunked uploads resume after a drop (digest-bound state + temp length), and
+  `file_upload` verifies the remote SHA-256 before reporting success.
+
 ## [0.1.10] — 2026-10-23
 
 Six fixes from an agent's field report: the long-running file tools were opaque and
