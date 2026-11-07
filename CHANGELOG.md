@@ -3,6 +3,109 @@
 All notable changes to winrdp-mcp are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses semantic versioning.
 
+## [0.1.11] — 2026-11-07
+
+Health checks that tell the truth, safe timeouts, full Defender/quarantine
+management, service/process detail, and Linux/macOS over SSH.
+
+### Added
+- **Real health matrix** (`health.py`): identity (expected computer name), principal
+  (High/System integrity + LocalAccountTokenFilterPolicy read back), a 64 KiB
+  SHA-256 transfer (chunked is a warning, not success), the same one-shot Scheduled
+  Task path as `run_powershell(elevated=True)`, session availability and platform.
+  `test_host` returns `ok`/`failed_step`/`steps`/`capabilities`, flags an
+  intercepting operator proxy with the dead-IP control (`ports_reliable`), and
+  invalidates a failed cached transport.
+- `expected_name` on `add_host` / `Host`; a mismatched computer name fails identity.
+- `process_details` (parent, full command line, executable, owner, session, start
+  time) and `service_info` (NSSM `AppDirectory`/`AppParameters`/`AppEnvironment`,
+  `ImagePath`, dependencies).
+- Defender: `defender_exclusions`, `defender_exclusion_remove`,
+  `defender_quarantine` (detections + threats), `defender_quarantine_restore`
+  (`MpCmdRun -Restore`), `defender_history_clear` with an explicit Tamper
+  Protection check.
+- `run_sh`, `run_script(interpreter=sh|bash)`, POSIX shebang detection, and
+  POSIX health. `SSHTransport` detects a POSIX shell, so a Linux/macOS host no
+  longer reports "No working transport"; `run_python`/`pip_install` use python3
+  (with optional `sudo -n`).
+- `session_id` on PowerShell/Python/script/process/GUI tools to pick a specific
+  interactive session on a multi-session host.
+- Per-call audit log (JSONL in the data dir; `WINRDP_AUDIT_LOG=0` disables).
+- `cleanup_staged(dry_run=True)` returns the manifest it would remove.
+- `run_powershell(max_output=N)` caps output server-side and reports `truncated`.
+
+### Changed
+- `add_host` warns when another alias already points at the same address;
+  `list_hosts` exposes `duplicate_hosts`.
+- `provision_host.success` now requires principal + hardening + transfer; a partial
+  success no longer persists `resolved_transport` as a health claim. `HARDEN_PS`
+  reads `LocalAccountTokenFilterPolicy` back and exits 1 on mismatch. The SFTP fast
+  channel is verified by a real write, not just a connection.
+
+### Fixed
+- `run_ps` no longer retries a mutating script by default: a recoverable timeout
+  used to re-run it (two hung `powershell.exe`). Reads opt in explicitly.
+- `run_powershell` / `run_script(powershell)` apply `$ErrorActionPreference='Stop'`,
+  so a non-terminating error fails with rc=1 instead of rc=0.
+- Chunked uploads resume after a drop (digest-bound state + temp length), and
+  `file_upload` verifies the remote SHA-256 before reporting success.
+
+## [0.1.10] — 2026-10-23
+
+Six fixes from an agent's field report: the long-running file tools were opaque and
+unstoppable, and a detached job was a dead end once it was launched.
+
+### Added
+- **`sync_folder(exclude=[...])` — glob excludes.** There was no way to leave
+  `node_modules/`, `*.bin` or `presets/` out of a sync. A pattern with no `/` matches the
+  basename at any depth; one with `/` matches the path relative to the sync root
+  (`presets/**`, `build/out/*.bin`); a trailing `/` restricts it to directories. Matching a
+  directory **prunes the subtree**, so a good exclude list also makes the scan itself fast.
+  Matching is case-insensitive and accepts `\` or `/`.
+- **`sync_folder` size guard + `dry_run`.** `sync_folder` used to zip a folder blind: a
+  100 MB+ tree was minutes of silence. It now SCANS FIRST, and if what remains is over the
+  ceiling it refuses *before zipping*, returning the measured size with `largest_entries` /
+  `largest_files` so you can see what to exclude. The ceiling defaults to 1 GB over a fast
+  SMB/SFTP channel and 25 MB over the slow chunked-WinRM fallback; override with `max_mb`
+  (`max_mb=0` disables) or `force=True`. `dry_run=True` returns the manifest and transfers
+  nothing.
+- **`file_upload` size guard.** Same preflight for a single file: over the chunked fallback
+  anything above 25 MB is refused with the size and a time estimate instead of 50 MB of
+  silence. `max_mb` / `force` as above; the hint points at `download_file` for big fetches.
+- **`task_status(name)` — check on a detached job.** After `run_powershell(detach=True)`
+  there was no way to reach the result. Pass back the `task` name and get the live state,
+  whether its process tree is still alive, the last run's **exit code**, and the tail of
+  both logs in one call. Task Scheduler's `0x413xx` pseudo-results surface as `task_result`
+  rather than being mistaken for an exit code.
+- **`kill_on_timeout=True` on `run_powershell` / `run_python` / `run_python_file` /
+  `run_script` / `run_node`.** A timeout only abandoned the request — the remote process
+  kept running and kept its locks. With this flag the process tree is killed. It works by
+  staging the script at a unique marker path and launching it as a child
+  `powershell -File`, so the marker identifies exactly that run's tree on the box (the
+  WinRM-spawned parent's command line is base64 `-EncodedCommand` and cannot be matched);
+  the kill runs on a fresh session, since the timed-out one still has its operation pending.
+
+### Changed
+- **An elevated/long op that times out is no longer orphaned.** `run_elevated` (behind
+  `elevated=True`, `install_software`, `ensure_runtime`, …) used to unregister its scheduled
+  task on timeout while the task kept running — leaving nothing to poll or stop. It now
+  leaves the task and its logs in place and names them in the error, pointing at
+  `task_status` / `task_stop`; `kill_on_timeout=True` stops and kills it instead.
+- **`sync_folder` and `file_upload` report what they did.** `channel`
+  (`smb`/`sftp`/`local`/`chunked`), elapsed seconds and throughput — plus, for
+  `sync_folder`, `bytes_local` / `bytes_zip` / `compression` and a per-phase `seconds`
+  breakdown (zip / upload / expand). A slow transfer is now explainable after the fact.
+  Progress notifications now also cover the scan and zip phases, not just the upload.
+- **`run_python` / `run_script` say where they run.** It was not obvious that they always
+  execute on the remote box and that `host=None` means *the active host*, not "locally".
+  The descriptions say so explicitly (and how to target the operator machine:
+  `add_host("local", "localhost", transport="local")`), and the result now carries the
+  `host` it ran on alongside the interpreter path.
+
+### Fixed
+- `sync_folder` no longer silently succeeds with an empty destination when every file was
+  excluded — it returns an error with the manifest.
+
 ## [0.1.9] — 2026-10-14
 
 ### Fixed

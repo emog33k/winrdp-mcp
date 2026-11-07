@@ -37,9 +37,13 @@ def register(mcp, ctx) -> None:
         return tooling.list_staged(ctx.transport_for(host))
 
     @mcp.tool
-    def cleanup_staged(name: Optional[str] = None, host: Optional[str] = None) -> dict:
-        """Remove a staged tool by name, or wipe the whole tool cache if name is omitted."""
-        return tooling.cleanup(ctx.transport_for(host), name)
+    def cleanup_staged(name: Optional[str] = None, host: Optional[str] = None,
+                       dry_run: bool = False) -> dict:
+        """Remove a staged tool by name, or wipe the whole tool cache if name is omitted.
+
+        Returns the manifest it covered (target, count, bytes, files). dry_run=True reports
+        what would be removed without deleting anything."""
+        return tooling.cleanup(ctx.transport_for(host), name, dry_run=dry_run)
 
     # ------------------------------------------------------------------ elevation / UAC
     @mcp.tool

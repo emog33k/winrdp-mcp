@@ -87,6 +87,9 @@ class Host:
     # populated by provision(): which transport actually works right now
     resolved_transport: str = ""
     notes: str = ""
+    # Expected $env:COMPUTERNAME (NetBIOS name). Health checks compare against it so a
+    # mis-pointed IP/alias cannot pass as the right box. Empty = report the name, don't enforce.
+    expected_name: str = ""
     tags: list = field(default_factory=list)  # for fan-out grouping
 
     def redacted(self) -> dict:

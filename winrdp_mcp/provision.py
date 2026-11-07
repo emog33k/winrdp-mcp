@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
-from . import config, ps
+from . import config, health, ps
 from .transports import (
     LocalTransport,
     SMBFiles,
@@ -120,6 +120,10 @@ try { Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server' 
 try { Enable-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction SilentlyContinue } catch {}
 $p='HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
 New-ItemProperty -Path $p -Name LocalAccountTokenFilterPolicy -Value 1 -PropertyType DWord -Force | Out-Null
+# Read the value back: New-ItemProperty can fail silently under EAP=Continue (policy
+# locked, wrong hive), and the marker below must not be printed on a hope.
+$v=(Get-ItemProperty -Path $p -Name LocalAccountTokenFilterPolicy -ErrorAction SilentlyContinue).LocalAccountTokenFilterPolicy
+if($v -ne 1){ Write-Error "LocalAccountTokenFilterPolicy read-back is '$v', expected 1"; exit 1 }
 Write-Output 'WINRDP_WINRM_HARDENED'
 """
 
@@ -153,6 +157,9 @@ class ProvisionReport:
     bootstrap_oneliner: str = ""
     success: bool = False
     message: str = ""
+    failed_step: Optional[str] = None
+    steps: list = field(default_factory=list)
+    health: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -165,6 +172,10 @@ class ProvisionReport:
             "actions": self.actions,
             "bootstrap_oneliner": self.bootstrap_oneliner,
             "success": self.success,
+            "ok": self.success,
+            "failed_step": self.failed_step,
+            "steps": self.steps,
+            "health": self.health,
             "message": self.message,
         }
 
@@ -323,15 +334,22 @@ def provision(h: Host, *, enable_ssh: bool = False, allow_wmi_bootstrap: bool = 
         rep.transport = "winrm"
         rep.winrm_enabled = True
         rep.actions.append("winrm-already-reachable")
-        _p(80, "WinRM reachable — hardening config")
-        _harden_winrm(t, rep, enable_basic)
+        _p(60, "WinRM reachable — hardening config")
+        harden_ok = _harden_winrm(t, rep, enable_basic)
         if fast_transfer:
-            _p(95, "ensuring a fast file-transfer channel")
+            _p(75, "ensuring a fast file-transfer channel")
             _ensure_fast_transfer(h, t, rep)
-        rep.success = True
-        rep.message = "WinRM reachable; hardened and ready."
-        h.resolved_transport = "winrm"
-        _p(100, "ready (WinRM)")
+        _p(85, "verifying principal, transfer and elevation")
+        rep.success = _verify_transport(t, h, rep, need_harden=True, harden_ok=harden_ok)
+        # resolved_transport is a cache hint, not a health claim: persist it only when the
+        # full principal + harden + transfer check passed.
+        h.resolved_transport = "winrm" if rep.success else ""
+        if rep.success:
+            rep.message = "WinRM healthy: principal, hardening and transfer verified."
+        else:
+            rep.message = (f"WinRM reachable, but provisioning is NOT complete: "
+                           f"{rep.failed_step} failed. See steps/health and actions.")
+        _p(100, "ready (WinRM)" if rep.success else "WinRM reachable, health check failed")
         return rep
 
     # Rung 2: SSH
@@ -346,19 +364,32 @@ def provision(h: Host, *, enable_ssh: bool = False, allow_wmi_bootstrap: bool = 
         if "WINRDP_WINRM_ENABLED" in r.stdout:
             rep.winrm_enabled = True
             rep.actions.append("winrm-enabled-via-ssh")
+        # Prefer WinRM now if it came up (probe it rather than trusting the port scan).
+        t2 = _try_winrm(h, False) if rep.winrm_enabled else None
+        if t2:
+            s.close()
+            rep.transport = "winrm"
+            harden_ok = _harden_winrm(t2, rep, enable_basic)
+            if fast_transfer:
+                _ensure_fast_transfer(h, t2, rep)
+            rep.success = _verify_transport(t2, h, rep, need_harden=True,
+                                            harden_ok=harden_ok)
+            h.resolved_transport = "winrm" if rep.success else ""
+            rep.message = ("Provisioned WinRM over the SSH channel; principal, hardening "
+                           "and transfer verified." if rep.success else
+                           f"WinRM came up over SSH but {rep.failed_step} failed.")
+            return rep
+        # Staying on SSH: the file channel is SFTP, so verify it with a real byte round-trip.
+        _p(80, "verifying principal and SFTP transfer")
+        rep.success = _verify_transport(s, h, rep, need_harden=False, harden_ok=True)
         s.close()
-        # prefer WinRM now if it came up
-        if rep.winrm_enabled and (_scan(h.host)["winrm_http"] or port_open(h.host, config.WINRM_HTTP_PORT)):
-            t2 = _try_winrm(h, False)
-            if t2:
-                rep.transport = "winrm"
-                h.resolved_transport = "winrm"
-                rep.success = True
-                rep.message = "Provisioned WinRM over the SSH channel."
-                return rep
-        h.resolved_transport = "ssh"
-        rep.success = True
-        rep.message = "SSH working; WinRM " + ("enabled." if rep.winrm_enabled else "not enabled.")
+        h.resolved_transport = "ssh" if rep.success else ""
+        if rep.success:
+            rep.message = ("SSH healthy: principal and SFTP transfer verified; WinRM "
+                           + ("enabled." if rep.winrm_enabled else "not enabled."))
+        else:
+            rep.message = (f"SSH reachable, but provisioning is NOT complete: "
+                           f"{rep.failed_step} failed. See steps/health and actions.")
         return rep
 
     # Rung 3: cold-start over SMB + WMI
@@ -370,13 +401,17 @@ def provision(h: Host, *, enable_ssh: bool = False, allow_wmi_bootstrap: bool = 
                 t3 = _try_winrm(h, False)
                 if t3:
                     rep.transport = "winrm"
-                    h.resolved_transport = "winrm"
-                    _harden_winrm(t3, rep, enable_basic)
+                    harden_ok = _harden_winrm(t3, rep, enable_basic)
                     if fast_transfer:
                         _ensure_fast_transfer(h, t3, rep)
-                    rep.success = True
-                    rep.message = "Cold-started WinRM via SMB+WMI bootstrap."
-                    _p(100, "ready (WinRM via cold-start)")
+                    rep.success = _verify_transport(t3, h, rep, need_harden=True,
+                                                    harden_ok=harden_ok)
+                    h.resolved_transport = "winrm" if rep.success else ""
+                    rep.message = ("Cold-started WinRM via SMB+WMI bootstrap; principal, "
+                                   "hardening and transfer verified." if rep.success else
+                                   f"Cold-started WinRM but {rep.failed_step} failed.")
+                    _p(100, "ready (WinRM via cold-start)" if rep.success
+                       else "cold-started WinRM, health check failed")
                     return rep
         except ImportError:
             rep.actions.append("wmi-bootstrap-unavailable (pip install 'winrdp-mcp[bootstrap]')")
@@ -388,6 +423,8 @@ def provision(h: Host, *, enable_ssh: bool = False, allow_wmi_bootstrap: bool = 
     # a transparent proxy / VPN on the operator side can make socket connects succeed for every
     # port, so rep.reachable_ports can be all-true and must not drive the recommendation.
     rep.success = False
+    rep.failed_step = "transport"
+    h.resolved_transport = ""  # a partial attempt is not a health claim
     _p(100, "no remote channel — manual bootstrap required")
     acted = " ".join(rep.actions)
     if "wmi-bootstrap-unavailable" in acted:
@@ -410,14 +447,54 @@ def provision(h: Host, *, enable_ssh: bool = False, allow_wmi_bootstrap: bool = 
     return rep
 
 
-def _harden_winrm(t: Transport, rep: ProvisionReport, enable_basic: bool = False) -> None:
-    """Re-run the enable script through an existing WinRM session (idempotent)."""
+def _harden_winrm(t: Transport, rep: ProvisionReport, enable_basic: bool = False) -> bool:
+    """Re-run the enable script through an existing WinRM session (idempotent).
+
+    Returns True only when the script exited 0 AND printed the marker; HARDEN_PS now reads
+    LocalAccountTokenFilterPolicy back and exits 1 instead of printing it blindly.
+    """
     try:
         r = t.run_ps(HARDEN_PS, timeout=120)
-        if "WINRDP_WINRM_HARDENED" in r.stdout:
+        if r.ok and "WINRDP_WINRM_HARDENED" in r.stdout:
             rep.actions.append("winrm-hardened")
+            return True
+        rep.actions.append(
+            f"winrm-harden-FAILED (rc={r.rc}): {(r.stderr or r.stdout).strip()[:200]}")
     except Exception as e:  # noqa: BLE001
-        rep.actions.append(f"winrm-harden-skipped: {e}")
+        rep.actions.append(f"winrm-harden-failed: {e}")
+    return False
+
+
+def _verify_transport(t: Transport, h: Host, rep: ProvisionReport, *,
+                      need_harden: bool, harden_ok: bool) -> bool:
+    """Run the full health matrix and decide whether provisioning is actually complete.
+
+    success requires principal + transfer (+ harden on the WinRM path). The other steps
+    (identity/session/platform) are reported in ``rep.health`` and can still make the
+    matrix's own ``ok`` false, but a headless box is a legitimate admin target.
+    """
+    hc = health.check_health(t, expected_name=getattr(h, "expected_name", "") or None)
+    rep.health = hc
+    rep.steps = hc["steps"]
+    by = {s["name"]: s for s in hc["steps"]}
+    principal = bool(by.get("principal", {}).get("ok"))
+    transfer = bool(by.get("transfer", {}).get("ok"))
+    ok = principal and transfer and (harden_ok if need_harden else True)
+    for s in hc["steps"]:
+        rep.actions.append(
+            f"health:{s['name']}={'ok' if s['ok'] else 'FAIL'} — {s['detail']}")
+    if ok:
+        rep.failed_step = None
+    elif need_harden and not harden_ok:
+        rep.failed_step = "harden"
+    elif not principal:
+        rep.failed_step = "principal"
+    elif not transfer:
+        rep.failed_step = "transfer"
+    else:
+        rep.failed_step = hc.get("failed_step")
+    return ok
+
 
 
 def _cold_start_wmi(h: Host, rep: ProvisionReport, enable_basic: bool = False) -> None:

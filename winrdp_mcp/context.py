@@ -20,9 +20,9 @@ import time
 from typing import Any, Optional
 
 from . import elevation, log, ps
-from .config import REMOTE_SECURE
+from .config import REMOTE_SECURE, REMOTE_TMP
 from .provision import open_transport, provision
-from .transports import ExecResult, Transport
+from .transports import ExecResult, Transport, TransportError
 from .vault import Host, Vault
 
 _log = log.get("context")
@@ -100,34 +100,149 @@ class Context:
         wrap: bool = False,
         elevated: bool = False,
         as_user: bool = False,
+        session_id: Optional[int] = None,
         loopback: bool = False,
         timeout: int = 120,
         progress=None,
+        kill_on_timeout: bool = False,
     ) -> ExecResult:
         h = self.resolve(host)
-        t = self.transport_for(host)
         script = ps.wrap_plain(body_or_script) if wrap else body_or_script
         mode = "as_user" if as_user else ("elevated" if elevated else "normal")
+        # Validate argument combinations BEFORE opening a transport: an invalid call must
+        # fail the same way on every OS (a POSIX local transport cannot even probe).
+        if kill_on_timeout and as_user:
+            raise ValueError("kill_on_timeout is not supported with as_user=True; cancel an "
+                             "interactive-session job with task_stop instead")
+        if session_id is not None and not as_user:
+            raise ValueError("session_id only applies with as_user=True (it selects the "
+                             "interactive session to run in)")
+        t = self.transport_for(host)
         start = time.time()
         try:
             if as_user:
-                r = elevation.run_in_user_session(t, script, timeout=timeout)
+                r = elevation.run_in_user_session(t, script, timeout=timeout,
+                                                  session_id=session_id)
                 return r
             # loopback=True forces the Scheduled Task path even when the WinRM session is
             # already elevated: the network-logon token blocks outbound 127.0.0.1, but the
             # task's service/batch logon does not.
             if loopback or (elevated and not t.is_elevated()):
                 er = elevation.run_elevated(t, script, timeout=timeout, run_as="SYSTEM",
-                                            progress=progress)
+                                            progress=progress,
+                                            kill_on_timeout=kill_on_timeout)
                 return ExecResult(er.stdout, er.stderr, er.rc)
             # Either not elevated, or the session already holds a full admin token — run
             # directly (over WinRM this is the fast, common case).
+            if kill_on_timeout:
+                return self._run_killable(h, t, script, timeout)
             return t.run_ps(script, timeout=timeout)
         except Exception:
             _log.warning("exec failed on %s [%s] after %.1fs", h.alias, mode, time.time() - start)
             raise
         finally:
             _log.debug("exec %s [%s via %s] %.1fs", h.alias, mode, t.name, time.time() - start)
+
+    def _run_killable(self, h: Host, t: Transport, script: str, timeout: int) -> ExecResult:
+        """Run ``script`` so that a timeout can actually KILL the remote process.
+
+        Two things make this work, and both are necessary:
+
+        1. **A marker the remote tree can be found by.** The script is staged at a path
+           containing a unique marker and launched as a CHILD
+           ``powershell -File <marker>.ps1``, so the marker appears on that child's command
+           line. That is the only reliable handle on exactly this run's processes — the
+           WinRM-spawned parent's command line is base64 ``-EncodedCommand``.
+        2. **A watchdog that fires ON the deadline, not after the call unblocks.** Killing
+           from the exception handler is too late: the transport's own timeout handling can
+           itself block until the remote work finishes (a local ``subprocess`` waits for the
+           inherited stdout pipe to close, i.e. until the grandchild exits), so the process
+           we meant to kill has already run to completion by the time we look for it. A
+           timer thread kills the tree at ``timeout``, which is also what unblocks the main
+           thread.
+        """
+        marker = f"winrdp_kot_{binascii.hexlify(os.urandom(5)).decode()}"
+        remote = f"{REMOTE_TMP}\\{marker}.ps1"
+        t.run_ps(ps.ensure_remote_dirs(), timeout=60)
+        t.upload(script.encode("utf-8-sig"), remote)  # BOM: PS 5.1 + 7 both read -File right
+
+        fired = threading.Event()
+        killed: dict[str, list] = {}
+
+        def watchdog() -> None:
+            fired.set()  # set BEFORE killing: the main thread may unblock the instant we do
+            killed["pids"] = self._kill_marker(h, marker)
+
+        timer = threading.Timer(max(timeout, 1), watchdog)
+        timer.daemon = True
+        timer.start()
+
+        def timed_out(cause: Optional[Exception]) -> TransportError:
+            timer.join(60)  # let the kill finish so the pid list is accurate
+            pids = killed.get("pids") or []
+            return TransportError(
+                f"command did not finish within {timeout}s on {h.alias}; killed "
+                f"{len(pids)} remote process(es) it had started (kill_on_timeout=True): "
+                f"{pids}" + (f" [{cause}]" if cause else ""))
+
+        try:
+            # The transport timeout is only a backstop: the watchdog is what bounds this
+            # call, and it needs room to kill the tree before the transport gives up.
+            r = t.run_ps(
+                "& powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass "
+                f"-File {ps.ps_string(remote)}",
+                timeout=timeout + 60,
+            )
+            if fired.is_set():
+                raise timed_out(None)
+            return r
+        except TransportError:
+            raise
+        except Exception as e:  # noqa: BLE001 — transport timeout or dropped session
+            if fired.is_set():
+                raise timed_out(e) from e
+            raise
+        finally:
+            timer.cancel()
+            try:
+                self.transport_for(h.alias).run_ps(
+                    f"Remove-Item -LiteralPath {ps.ps_string(remote)} -Force -ErrorAction SilentlyContinue",
+                    timeout=30)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _kill_marker(self, host: Host, marker: str) -> list:
+        """Kill every process on the box whose command line mentions ``marker``.
+
+        Opens a DEDICATED short-lived session rather than using the cached transport: this
+        runs from a watchdog thread while the main thread is still mid-request on that
+        transport, and on WinRM a second operation on the same shell (or one whose previous
+        operation is still pending) returns HTTP 400."""
+        body = (
+            f"$m={ps.ps_string(marker)};$killed=@();"
+            "try{$procs=@(Get-CimInstance Win32_Process -Filter \"CommandLine LIKE '%$m%'\" "
+            "-ErrorAction SilentlyContinue);foreach($p in $procs){"
+            "try{& taskkill /PID $($p.ProcessId) /T /F 2>$null|Out-Null;$killed+=$p.ProcessId}catch{}}}catch{};"
+            "$result=@{killed=@($killed)}"
+        )
+        t = None
+        try:
+            t = open_transport(host)
+            data = ps.parse_json(t.run_ps(ps.wrap_json(body), timeout=90).stdout)
+            k = data.get("killed") if isinstance(data, dict) else None
+            if isinstance(k, int):  # ConvertTo-Json unwraps a single element
+                return [k]
+            return list(k or [])
+        except Exception as e:  # noqa: BLE001 — the kill is best-effort
+            _log.warning("kill_on_timeout: could not kill marker %s on %s: %s",
+                         marker, host.alias, e)
+            return []
+        finally:
+            if t is not None:
+                try:
+                    t.close()
+                except Exception:  # noqa: BLE001
+                    pass
 
     def _stage_secrets(self, t: Transport, secrets: dict) -> tuple[str, list[str]]:
         """Upload each secret to an admin-only temp file on the box and return a PS prelude
@@ -215,7 +330,7 @@ class Context:
         return ps.parse_json(r.stdout)
 
     def run_long(self, script: str, *, host: Optional[str] = None, timeout: int = 1800,
-                 progress=None) -> ExecResult:
+                 progress=None, kill_on_timeout: bool = False) -> ExecResult:
         """Run a long (minutes-scale) command detached, then poll for completion.
 
         A multi-minute command (a package install, a Windows Update) cannot be held open
@@ -226,18 +341,24 @@ class Context:
 
         progress: optional ``callable(elapsed_seconds)`` invoked on each poll, so a caller can
         emit a heartbeat and the op never looks hung.
+
+        kill_on_timeout: stop the task and kill its process tree when the poll deadline
+        expires. Off by default — a long install that overran its timeout is usually still
+        making progress, so the task and its logs are left for ``task_status`` /
+        ``task_stop`` instead (the timeout message names the task).
         """
         t = self.transport_for(host)
-        er = elevation.run_elevated(t, script, timeout=timeout, run_as="SYSTEM", progress=progress)
+        er = elevation.run_elevated(t, script, timeout=timeout, run_as="SYSTEM",
+                                    progress=progress, kill_on_timeout=kill_on_timeout)
         return ExecResult(er.stdout, er.stderr, er.rc)
 
     def run_long_json(self, body: str, *, host: Optional[str] = None, timeout: int = 1800,
-                      depth: int = 6, progress=None) -> Any:
+                      depth: int = 6, progress=None, kill_on_timeout: bool = False) -> Any:
         """Like :meth:`run_long` but for a JSON-emitting body (assigns ``$result``): always
         takes the detached poll path (so a heartbeat works even on an already-elevated
         session) and returns parsed data. Runs as SYSTEM — use only where that is fine."""
         r = self.run_long(ps.wrap_json(body, depth=depth), host=host, timeout=timeout,
-                          progress=progress)
+                          progress=progress, kill_on_timeout=kill_on_timeout)
         return ps.parse_json(r.stdout)
 
     def close(self) -> None:

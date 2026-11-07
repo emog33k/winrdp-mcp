@@ -63,6 +63,53 @@ ACTIVE_SESSION_PROBE_PS = (
     "else{" + _HOME_FALLBACK_PS + "}"
 )
 
+# Windows Home boxes may lack qwinsta. Fall back to the console user confirmed by an
+# explorer.exe owned by that user, and expose it as a synthetic console row.
+_HOME_FALLBACK_ROWS_PS = (
+    "$u=[string](Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).UserName;"
+    "if($u){$leaf=($u -split '\\')[-1];$found=$false;"
+    "$shells=@(Get-CimInstance Win32_Process -Filter \"Name='explorer.exe'\" "
+    "-ErrorAction SilentlyContinue);"
+    "foreach($p in $shells){"
+    "$o=Invoke-CimMethod -InputObject $p -MethodName GetOwner -ErrorAction SilentlyContinue;"
+    "if($o){$full=if($o.Domain){$o.Domain+'\\'+$o.User}else{$o.User};"
+    "if(($full -ieq $u)-or($o.User -ieq $leaf)){$found=$true;break}}};"
+    "if($found){$rows=@(@{session='console';user=$u;id='';state='Active';active=$true});"
+    "$active=$true;$console=$true}}"
+)
+
+# Structured session list for session selection (same header slicing as above).
+SESSIONS_PS = (
+    "$active=$false;$console=$false;$rows=@();"
+    "$q=Get-Command qwinsta -ErrorAction SilentlyContinue;"
+    "if($q){$lines=@(& $q.Source 2>$null);"
+    "if($lines.Count -ge 1){$h=[string]$lines[0];"
+    "$iS=$h.IndexOf('SESSIONNAME');$iU=$h.IndexOf('USERNAME');"
+    "$iI=$h.IndexOf('ID');$iT=$h.IndexOf('STATE');"
+    "if($iS -ge 0 -and $iU -gt $iS -and $iI -gt $iU -and $iT -gt $iI){"
+    "foreach($l in ($lines|Select-Object -Skip 1)){"
+    "if($l.Length -le $iT){continue};"
+    "$nm=$l.Substring($iS,$iU-$iS).Trim().TrimStart([char]'>');"
+    "$u=$l.Substring($iU,$iI-$iU).Trim();"
+    "$id=$l.Substring($iI,$iT-$iI).Trim();"
+    "$st=($l.Substring($iT).Trim() -split '\\s+')[0];"
+    "$a=($u -and $st -ieq 'Active');"
+    "if($nm -ieq 'console'){$console=$true};"
+    "if($a){$active=$true};"
+    "$rows+=@{session=$nm;user=$u;id=$id;state=$st;active=$a}}}}"
+    "}else{" + _HOME_FALLBACK_ROWS_PS + "};"
+    "$result=@{active=$active;console=$console;rows=@($rows)}"
+)
+
+
+def list_sessions(transport: Transport) -> dict:
+    """Return {active, console, rows:[{session,user,id,state,active}]} from qwinsta."""
+    r = transport.run_ps(ps.wrap_json(SESSIONS_PS), timeout=30, idempotent=True)
+    data = ps.parse_json(r.stdout)
+    if not isinstance(data, dict) or "error" in data:
+        raise TransportError((data or {}).get("error") or "could not read interactive sessions")
+    return data
+
 
 @dataclass
 class ElevatedResult:
@@ -79,6 +126,36 @@ def _rid() -> str:
     return binascii.hexlify(os.urandom(6)).decode()
 
 
+def kill_task(transport: Transport, task: str, marker: str, *,
+              unregister: bool = True) -> list[int]:
+    """Stop a scheduled task AND kill the process tree it spawned; return the killed pids.
+
+    ``Stop-ScheduledTask`` alone is not enough: it signals the task, but a child process the
+    task's powershell already started (an installer, a python script) keeps running. The
+    task's staged script path is a unique string on those processes' command lines, so
+    ``marker`` identifies exactly that tree and nothing else. Best-effort throughout — a
+    cleanup path must not raise over the error that triggered it.
+    """
+    body = (
+        f"$n={ps.ps_string(task)};$m={ps.ps_string(marker)};$killed=@();"
+        "try{Stop-ScheduledTask -TaskName $n -ErrorAction SilentlyContinue}catch{};"
+        "try{$procs=@(Get-CimInstance Win32_Process -Filter \"CommandLine LIKE '%$m%'\" "
+        "-ErrorAction SilentlyContinue);foreach($p in $procs){"
+        "try{& taskkill /PID $($p.ProcessId) /T /F 2>$null|Out-Null;$killed+=$p.ProcessId}catch{}}}catch{};"
+        + ("try{Unregister-ScheduledTask -TaskName $n -Confirm:$false -ErrorAction SilentlyContinue}catch{};"
+           if unregister else "")
+        + "$result=@{killed=@($killed)}"
+    )
+    try:
+        data = ps.parse_json(transport.run_ps(ps.wrap_json(body), timeout=90).stdout)
+        killed = data.get("killed") if isinstance(data, dict) else None
+        if isinstance(killed, int):  # ConvertTo-Json unwraps a single element
+            return [killed]
+        return list(killed or [])
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def run_elevated(
     transport: Transport,
     script: str,
@@ -88,8 +165,15 @@ def run_elevated(
     password: Optional[str] = None,
     poll: float = 1.5,
     progress=None,
+    kill_on_timeout: bool = False,
 ) -> ElevatedResult:
-    """Execute ``script`` with a full elevated token via a transient Scheduled Task."""
+    """Execute ``script`` with a full elevated token via a transient Scheduled Task.
+
+    On timeout the remote work does NOT stop by itself — the deadline here is only the
+    poll loop's. ``kill_on_timeout=True`` stops the task and kills its process tree before
+    raising; otherwise the task and its logs are deliberately LEFT IN PLACE (not cleaned
+    up) so the caller can poll it with ``task_status`` or cancel it with ``task_stop``.
+    """
     rid = _rid()
     task = f"winrdp_elev_{rid}"
     base = f"{REMOTE_TMP}\\{task}"
@@ -129,11 +213,13 @@ def run_elevated(
         )
     reg_lines.append(f"Start-ScheduledTask -TaskName {ps.ps_string(task)}")
     transport.run_ps(";".join(reg_lines), timeout=60).raise_for_status("register elevated task")
+    timed_out = False
     try:
         start = time.time()
         deadline = start + timeout
         while time.time() < deadline:
-            chk = transport.run_ps(f"Test-Path -LiteralPath {ps.ps_string(done_f)}", timeout=30)
+            chk = transport.run_ps(f"Test-Path -LiteralPath {ps.ps_string(done_f)}",
+                                   timeout=30, idempotent=True)
             if "True" in chk.stdout:
                 break
             if progress is not None:
@@ -143,7 +229,18 @@ def run_elevated(
                     pass
             time.sleep(poll)
         else:
-            raise TransportError(f"elevated task timed out after {timeout}s")
+            timed_out = True
+            if kill_on_timeout:
+                killed = kill_task(transport, task, remote_ps)
+                raise TransportError(
+                    f"elevated task timed out after {timeout}s — task stopped and "
+                    f"{len(killed)} process(es) killed on the box (kill_on_timeout=True)")
+            raise TransportError(
+                f"elevated task timed out after {timeout}s, but it is STILL RUNNING on the "
+                f"box (the deadline is the poll loop's, not the remote process's). Poll it "
+                f"with task_status('{task}'), read its output with tail_file('{out_f}'), or "
+                f"cancel it with task_stop('{task}'). Pass kill_on_timeout=True to have a "
+                f"timeout kill it instead of leaving it running.")
 
         out = _safe_read(transport, out_f)
         err = _safe_read(transport, err_f)
@@ -157,17 +254,20 @@ def run_elevated(
         return ElevatedResult(out, err, rc)
     finally:
         # Best-effort cleanup: if it raises (wedged transport) it must NOT replace the
-        # result / mask the real exception being propagated.
-        try:
-            transport.run_ps(
-                f"Unregister-ScheduledTask -TaskName {ps.ps_string(task)} -Confirm:$false -ErrorAction SilentlyContinue;"
-                "Remove-Item -LiteralPath " + ",".join(
-                    ps.ps_string(p) for p in (remote_ps, out_f, err_f, done_f)
-                ) + " -Force -ErrorAction SilentlyContinue",
-                timeout=30,
-            )
-        except Exception:  # noqa: BLE001
-            pass
+        # result / mask the real exception being propagated. Skipped entirely on a timeout
+        # the caller didn't ask us to kill — unregistering a task that is still running
+        # would orphan it, leaving no handle to poll or stop it with.
+        if not timed_out or kill_on_timeout:
+            try:
+                transport.run_ps(
+                    f"Unregister-ScheduledTask -TaskName {ps.ps_string(task)} -Confirm:$false -ErrorAction SilentlyContinue;"
+                    "Remove-Item -LiteralPath " + ",".join(
+                        ps.ps_string(p) for p in (remote_ps, out_f, err_f, done_f)
+                    ) + " -Force -ErrorAction SilentlyContinue",
+                    timeout=30,
+                )
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def run_detached(transport: Transport, script: str, *, run_as: str = "SYSTEM") -> dict:
@@ -202,8 +302,10 @@ def run_detached(transport: Transport, script: str, *, run_as: str = "SYSTEM") -
     return {
         "detached": True, "task": task, "stdout_log": out_f, "stderr_log": err_f,
         "note": ("running outside the WinRM Job Object (survives session close) and with "
-                 "loopback access. Read output with tail_file(stdout_log); stop it cleanly "
-                 f"with task_stop('{task}') (stops the task and kills its process tree)."),
+                 f"loopback access. Check whether it is still alive and what it exited with "
+                 f"via task_status('{task}'); read more output with tail_file(stdout_log); "
+                 f"stop it cleanly with task_stop('{task}') (stops the task and kills its "
+                 "process tree)."),
     }
 
 
@@ -215,11 +317,18 @@ def _safe_read(transport: Transport, path: str) -> str:
     return r.stdout
 
 
-def run_in_user_session(transport: Transport, script: str, *, timeout: int = 120) -> ExecResult:
-    """Run ``script`` inside the active interactive user's session (for GUI work).
+def run_in_user_session(transport: Transport, script: str, *, timeout: int = 120,
+                        session_id: Optional[int] = None) -> ExecResult:
+    """Run ``script`` inside an interactive user's session (for GUI work).
 
-    Uses a Scheduled Task bound to the console user with an interactive logon so the
-    process attaches to the visible desktop. Output capture is best-effort.
+    Uses a Scheduled Task bound to that user with an interactive logon so the process
+    attaches to the visible desktop. ``session_id`` selects a row from
+    :func:`list_sessions`; without it the first Active session is used. A disconnected
+    session has no composed desktop and fails with an actionable message.
+
+    Limitation: Task Scheduler binds to the USER, not to a session id — if the same user
+    has several interactive sessions the OS picks one. True per-session pinning needs
+    CreateProcessAsUser.
     """
     rid = _rid()
     task = f"winrdp_ui_{rid}"
@@ -227,20 +336,35 @@ def run_in_user_session(transport: Transport, script: str, *, timeout: int = 120
     out_f = f"{REMOTE_TMP}\\{task}.out"
     done_f = f"{REMOTE_TMP}\\{task}.done"
 
-    # Discover an ACTIVE interactive session (GUI/desktop ops need a connected session; a
-    # Disconnected RDP session has no composed desktop, so fail with an actionable message).
-    who = transport.run_ps(ACTIVE_SESSION_PROBE_PS, timeout=30)
-    line = (who.stdout or "").strip().splitlines()[-1].strip() if who.stdout.strip() else "NONE"
-    if line.startswith("ACTIVE:"):
-        user = line[len("ACTIVE:"):]
-    elif line.startswith("DISC:"):
-        raise TransportError(
-            f"the interactive session for '{line[len('DISC:'):]}' is Disconnected — GUI / as_user "
-            "ops need a connected desktop. Reconnect RDP, or call "
-            "rdp_connect_to_console(session_id) to move the session to the console (which "
-            "composes the desktop).")
+    rows = [r for r in (list_sessions(transport).get("rows") or []) if r.get("user")]
+    if session_id is not None:
+        match = [r for r in rows if str(r.get("id")) == str(session_id)]
+        if not match:
+            available = ", ".join(
+                f"{r.get('id')}:{r.get('user')}:{r.get('state')}" for r in rows) or "none"
+            raise TransportError(
+                f"session {session_id} not found; available sessions: {available}")
+        chosen = match[0]
+        if not chosen.get("active"):
+            raise TransportError(
+                f"session {session_id} ({chosen.get('user')}) is {chosen.get('state')} — "
+                "GUI / as_user ops need an Active session. Reconnect RDP, or call "
+                "rdp_connect_to_console(session_id) to move it to the console.")
     else:
-        raise TransportError("no interactive user session on the box for GUI / as_user ops")
+        active = [r for r in rows if r.get("active")]
+        if active:
+            chosen = active[0]
+        else:
+            disc = [r for r in rows
+                    if str(r.get("state", "")).lower().startswith(("disc", "откл"))]
+            if disc:
+                raise TransportError(
+                    f"the interactive session for '{disc[0].get('user')}' is Disconnected — "
+                    "GUI / as_user ops need a connected desktop. Reconnect RDP, or call "
+                    "rdp_connect_to_console(session_id) to move the session to the console "
+                    "(which composes the desktop).")
+            raise TransportError("no interactive user session on the box for GUI / as_user ops")
+    user = chosen["user"]
 
     wrapper = (
         "[Console]::OutputEncoding=[Text.Encoding]::UTF8;"

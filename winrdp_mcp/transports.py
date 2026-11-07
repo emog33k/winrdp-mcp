@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import binascii
 import gzip
+import hashlib
 import io
 import os
 import shlex
@@ -94,6 +95,19 @@ _CHUNK = 1600
 # Staging uses the fast file channel (SMB/SFTP), so it stays cheap.
 _MAX_INLINE_PS = 2400
 
+# Rough throughput per file channel, MB/s — used ONLY to turn a byte count into a
+# human/model-readable "this will take about N minutes" before a transfer starts, so a big
+# upload can be refused with a reason instead of blocking in silence. Order-of-magnitude
+# figures from observed transfers, not a measurement: `chunked` is _CHUNK bytes per WinRM
+# round-trip, which is why it is ~50x slower than SMB and worth warning about.
+CHANNEL_MBPS = {"local": 150.0, "smb": 20.0, "sftp": 8.0, "chunked": 0.4}
+
+
+def transfer_eta_seconds(total_bytes: int, channel: str | None) -> float:
+    """Rough seconds to move ``total_bytes`` over ``channel`` (None = chunked fallback)."""
+    rate = CHANNEL_MBPS.get(channel or "chunked", CHANNEL_MBPS["chunked"])
+    return (total_bytes / (1024 * 1024)) / rate
+
 
 class Transport:
     """Abstract transport."""
@@ -115,17 +129,19 @@ class Transport:
                     "[Security.Principal.WindowsIdentity]::GetCurrent())."
                     "IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))"
                     "{'ELEV_YES'}else{'ELEV_NO'}",
-                    timeout=30,
+                    timeout=30, idempotent=True,
                 )
                 self._elevated = "ELEV_YES" in r.stdout
             except Exception:
                 self._elevated = False
         return self._elevated
 
-    def run_ps(self, script: str, timeout: int = 120) -> ExecResult:  # pragma: no cover
+    def run_ps(self, script: str, timeout: int = 120,
+               idempotent: bool = False) -> ExecResult:  # pragma: no cover
         raise NotImplementedError
 
-    def _run_ps_inline(self, script: str, timeout: int = 120, idempotent: bool = True) -> ExecResult:
+    def _run_ps_inline(self, script: str, timeout: int = 120,
+                       idempotent: bool = False) -> ExecResult:
         """Run a short script WITHOUT the large-script staging path.
 
         The base :meth:`upload` chunk loop calls this so a transport that stages large
@@ -160,15 +176,46 @@ class Transport:
         # gzip first: the fallback's cost is round-trips, and its usual payload (a staged .ps1)
         # compresses ~3-5x, so this cuts chunk count proportionally. The box decompresses on
         # finalize. (Incompressible data costs ~18 bytes of header — negligible.)
-        b64 = base64.b64encode(gzip.compress(data)).decode("ascii")
+        payload = gzip.compress(data)
+        digest = hashlib.sha256(payload).hexdigest()
+        b64 = base64.b64encode(payload).decode("ascii")
         tmp = remote_path + ".gz.b64"
-        self._run_ps_inline(
-            f"if(Test-Path {ps.ps_string(tmp)}){{Remove-Item -LiteralPath {ps.ps_string(tmp)} -Force}}",
-            idempotent=False,
-        ).raise_for_status()
+        state = remote_path + ".gz.state"
         total = len(data)
         n_b64 = len(b64)
-        for i in range(0, n_b64, _CHUNK):
+
+        # Resume support. The state file binds the temp to THIS payload (digest of the
+        # compressed bytes); the temp's length is how many base64 chars already landed.
+        # AppendAllText is atomic per chunk, so that length is a chunk boundary — a partial
+        # tail is truncated defensively. A different payload resets the temp.
+        prep = (
+            f"$p={ps.ps_string(remote_path)};$t={ps.ps_string(tmp)};$s={ps.ps_string(state)};"
+            "$d=Split-Path $p -Parent;"
+            "if($d -and -not(Test-Path $d)){New-Item -ItemType Directory -Path $d -Force|Out-Null};"
+            f"$want={ps.ps_string(digest)};$have=$null;"
+            "if(Test-Path -LiteralPath $s){$have=(Get-Content -LiteralPath $s -Raw).Trim()};"
+            "if($have -ne $want){"
+            "Remove-Item -LiteralPath $t -Force -ErrorAction SilentlyContinue;"
+            "Set-Content -LiteralPath $s -Value $want -Encoding ascii;$off=0"
+            "}elseif(Test-Path -LiteralPath $t){$off=(Get-Item -LiteralPath $t).Length}else{$off=0};"
+            "Write-Output $off"
+        )
+        r = self.run_ps(prep, timeout=timeout)
+        r.raise_for_status("prepare upload")
+        try:
+            off = int((r.stdout or "0").strip().splitlines()[-1] or 0)
+        except (ValueError, IndexError):
+            off = 0
+        off -= off % _CHUNK
+        if off < 0 or off > n_b64:
+            off = 0
+        if off:
+            self._run_ps_inline(
+                f"$f=[IO.File]::Open({ps.ps_string(tmp)},'Open','Write');"
+                f"$f.SetLength({off});$f.Close()",
+                timeout=timeout, idempotent=False,
+            ).raise_for_status("truncate partial chunk")
+        for i in range(off, n_b64, _CHUNK):
             chunk = b64[i:i + _CHUNK]
             # [IO.File]::AppendAllText opens→appends→closes the file atomically per call — no
             # lingering stream handle (Add-Content could fail "Stream was not readable" when a
@@ -194,7 +241,7 @@ class Transport:
             "$gz=New-Object System.IO.Compression.GZipStream($mi,[System.IO.Compression.CompressionMode]::Decompress);"
             "$mo=New-Object System.IO.MemoryStream;$gz.CopyTo($mo);$gz.Dispose();$mi.Dispose();"
             f"[IO.File]::WriteAllBytes({ps.ps_string(remote_path)},$mo.ToArray());$mo.Dispose();"
-            f"Remove-Item -LiteralPath {ps.ps_string(tmp)} -Force",
+            f"Remove-Item -LiteralPath {ps.ps_string(tmp)},{ps.ps_string(state)} -Force",
             timeout=timeout,
         ).raise_for_status("finalize upload")
 
@@ -205,6 +252,14 @@ class Transport:
             timeout=timeout,
         ).raise_for_status("download")
         return base64.b64decode(r.stdout.strip())
+
+    def file_channel(self) -> Optional[str]:
+        """Name of the channel :meth:`upload` will actually use — ``smb``/``sftp``/``local``,
+        or ``None`` for the chunked base64-over-run_ps fallback (~50x slower).
+
+        Callers use this to size a transfer *before* starting it: see
+        :func:`transfer_eta_seconds`. Cheap after the first call (the probe is cached)."""
+        return None
 
     def probe(self) -> bool:  # pragma: no cover
         raise NotImplementedError
@@ -286,7 +341,7 @@ class WinRMTransport(Transport):
         msg = str(exc)
         return "Code 400" in msg or "Code 500" in msg or "RemoteDisconnected" in msg
 
-    def _run(self, fn, *, idempotent: bool = True):
+    def _run(self, fn, *, idempotent: bool = False):
         """Run a pywinrm call, reconnecting + retrying once on a recoverable error.
 
         The retry is only safe for idempotent calls (reads/probes): a remote OperationTimeout
@@ -324,12 +379,16 @@ class WinRMTransport(Transport):
         except Exception:  # noqa: BLE001
             pass
 
-    def run_ps(self, script: str, timeout: int = 120, idempotent: bool = True) -> ExecResult:
+    def run_ps(self, script: str, timeout: int = 120,
+               idempotent: bool = False) -> ExecResult:
         # NOTE: no thread-based watchdog here. pywinrm's Session (requests.Session + the open
         # WSMan shell) is not thread-safe; abandoning a call mid-flight corrupts it and every
         # later request returns HTTP 400. Bounding comes from read_timeout_sec; a dropped or
         # wedged connection is healed by _run reconnecting and retrying once. All session use
         # is serialized by _oplock (reentrant, so the staging path below re-enters safely).
+        #
+        # idempotent defaults to False: a retry after a mid-flight drop can run a MUTATING
+        # script twice (two hung powershell.exe were exactly this). Reads opt in explicitly.
         if len(script) > _MAX_INLINE_PS:
             # pywinrm packs run_ps as `powershell -EncodedCommand <base64>` on ONE command
             # line; a big script overflows the length limit. Stage it and run via -File.
@@ -344,7 +403,8 @@ class WinRMTransport(Transport):
             rc=r.status_code,
         )
 
-    def _run_ps_inline(self, script: str, timeout: int = 120, idempotent: bool = True) -> ExecResult:
+    def _run_ps_inline(self, script: str, timeout: int = 120,
+                       idempotent: bool = False) -> ExecResult:
         # Same as run_ps but NEVER stages to a file: used by the base upload chunk loop so an
         # upload can't re-enter staging (which uploads → recurses). Chunks are < _MAX_INLINE_PS.
         with self._oplock:
@@ -416,17 +476,32 @@ class WinRMTransport(Transport):
                     return self._fchan
         except Exception as e:  # noqa: BLE001
             _log.debug("winrm %s: SMB channel unavailable: %s", self.host, e)
-        # 2) SFTP over SSH
+        # 2) SFTP over SSH — verify the subsystem by moving a byte, not just by connecting.
+        # Auth can succeed while sshd_config denies the sftp-server subsystem (or the account
+        # is chrooted without one); claiming "sftp (verified)" then would be a false positive.
         try:
             if port_open(self.host, SSH_PORT, timeout=2):
                 ssh = SSHTransport(self.host, usr, self._password, port=SSH_PORT)
-                self._fchan = ("sftp", ssh)
-                _log.debug("winrm %s: fast file channel = SFTP", self.host)
-                return self._fchan
+                try:
+                    if ssh.verify_sftp():
+                        self._fchan = ("sftp", ssh)
+                        _log.debug("winrm %s: fast file channel = SFTP (verified)", self.host)
+                        return self._fchan
+                except Exception as e:  # noqa: BLE001
+                    _log.debug("winrm %s: SFTP subsystem unavailable: %s", self.host, e)
+                try:
+                    ssh.close()
+                except Exception:  # noqa: BLE001
+                    pass
         except Exception as e:  # noqa: BLE001
             _log.debug("winrm %s: SFTP channel unavailable: %s", self.host, e)
         self._fchan = False
         return None
+
+    def file_channel(self) -> Optional[str]:
+        with self._oplock:
+            ch = self._fast_channel()
+        return ch[0] if ch else None
 
     def _drop_fast_channel(self) -> None:
         """Close and forget the current fast file channel (so it isn't leaked when it fails
@@ -481,7 +556,7 @@ class WinRMTransport(Transport):
 
     def probe(self) -> bool:
         try:
-            r = self.run_ps("$true", timeout=15)
+            r = self.run_ps("$true", timeout=15, idempotent=True)
             return r.ok
         except Exception:
             return False
@@ -508,6 +583,7 @@ class SSHTransport(Transport):
         self.host = host
         self.port = port
         self._oplock = threading.RLock()  # serialize channel/SFTP use (paramiko isn't safe under races)
+        self._posix: Optional[bool] = None  # cached: does this host have a POSIX shell?
         self._client = paramiko.SSHClient()
         self._client.load_system_host_keys()
         # host_key_policy: "auto" = trust-on-first-use (pragmatic for fresh boxes),
@@ -525,7 +601,24 @@ class SSHTransport(Transport):
             timeout=15,
         )
 
-    def run_ps(self, script: str, timeout: int = 120) -> ExecResult:
+    def is_posix(self) -> bool:
+        """True when the SSH host runs a POSIX shell (Linux/macOS), not Windows OpenSSH."""
+        if self._posix is None:
+            try:
+                r = self._exec("sh -c 'echo WINRDP_POSIX'", 15)
+                self._posix = "WINRDP_POSIX" in r.stdout
+            except Exception:  # noqa: BLE001
+                self._posix = False
+        return self._posix
+
+    def run_sh(self, script: str, timeout: int = 120) -> ExecResult:
+        """Run a POSIX shell command. Only meaningful when :meth:`is_posix` is true."""
+        if not self.is_posix():
+            raise TransportError("host has no POSIX shell (use run_ps for Windows SSH)")
+        return self._exec(f"sh -lc {shlex.quote(script)}", timeout)
+
+    def run_ps(self, script: str, timeout: int = 120,
+               idempotent: bool = False) -> ExecResult:
         if len(script) > _MAX_INLINE_PS:
             return self._run_ps_via_file(script, timeout)
         enc = ps.encode_command(script)
@@ -546,6 +639,8 @@ class SSHTransport(Transport):
                 pass
 
     def run_cmd(self, command: str, timeout: int = 120) -> ExecResult:
+        if self.is_posix():
+            return self.run_sh(command, timeout)
         # The SSH DefaultShell is set to PowerShell by provisioning, so a bare command
         # would run under PowerShell (wrong quoting/`$` interpolation for cmd builtins like
         # schtasks/shutdown/netsh). Force real cmd.exe semantics by invoking it explicitly.
@@ -559,12 +654,36 @@ class SSHTransport(Transport):
             rc = stdout.channel.recv_exit_status()
         return ExecResult(out, err, rc)
 
+    def file_channel(self) -> Optional[str]:
+        return "sftp"
+
+    def verify_sftp(self) -> bool:
+        """Prove the SFTP subsystem works: open it, write a byte, remove it.
+
+        Written in the account's home directory so it needs no pre-created remote dir.
+        Raises on any failure; the fast-channel probe treats that as "no SFTP".
+        """
+        rid = binascii.hexlify(os.urandom(6)).decode()
+        name = f"winrdp_sftp_{rid}.tmp"
+        with self._oplock:
+            sftp = self._client.open_sftp()
+            try:
+                sftp.putfo(io.BytesIO(b"winrdp"), name)
+                sftp.remove(name)
+            finally:
+                sftp.close()
+        return True
+
     def upload(self, data: bytes, remote_path: str, timeout: int = 300, progress=None) -> None:
         # Ensure parent dir, then SFTP the bytes — far faster than base64 chunking.
-        self.run_ps(
-            f"$d=Split-Path {ps.ps_string(remote_path)} -Parent;"
-            "if($d -and -not(Test-Path $d)){New-Item -ItemType Directory -Path $d -Force|Out-Null}"
-        ).raise_for_status("mkdir for upload")
+        if self.is_posix():
+            parent = remote_path.rsplit("/", 1)[0] if "/" in remote_path else "."
+            self.run_sh(f"mkdir -p {shlex.quote(parent)}", timeout=30)
+        else:
+            self.run_ps(
+                f"$d=Split-Path {ps.ps_string(remote_path)} -Parent;"
+                "if($d -and -not(Test-Path $d)){New-Item -ItemType Directory -Path $d -Force|Out-Null}"
+            ).raise_for_status("mkdir for upload")
         with self._oplock:
             sftp = self._client.open_sftp()
             try:
@@ -588,8 +707,10 @@ class SSHTransport(Transport):
                 sftp.close()
 
     def probe(self) -> bool:
+        if self.is_posix():
+            return True
         try:
-            return self.run_ps("$true", timeout=15).ok
+            return self.run_ps("$true", timeout=15, idempotent=True).ok
         except Exception:
             return False
 
@@ -612,7 +733,8 @@ class LocalTransport(Transport):
     def _powershell_exe(self) -> str:
         return "powershell.exe" if os.name == "nt" else "pwsh"
 
-    def run_ps(self, script: str, timeout: int = 120) -> ExecResult:
+    def run_ps(self, script: str, timeout: int = 120,
+               idempotent: bool = False) -> ExecResult:
         if len(script) > _MAX_INLINE_PS:
             return self._run_ps_via_file(script, timeout)
         enc = ps.encode_command(script)
@@ -661,6 +783,9 @@ class LocalTransport(Transport):
             proc.stderr.decode("utf-8", "replace"),
             proc.returncode,
         )
+
+    def file_channel(self) -> Optional[str]:
+        return "local"
 
     def upload(self, data: bytes, remote_path: str, timeout: int = 300, progress=None) -> None:
         os.makedirs(os.path.dirname(remote_path) or ".", exist_ok=True)

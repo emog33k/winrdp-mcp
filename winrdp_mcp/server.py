@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import os
+import threading
+import time
 
 from fastmcp import FastMCP
 
-from . import __version__, log, prompts, resources, toolsets
+from . import __version__, config, log, prompts, resources, toolsets
 from .context import Context
 from .tools import register_all
 from .vault import Host
@@ -48,15 +51,17 @@ needs it. For a rare one-off, prefer run_powershell over enabling a whole group.
 READONLY = {
     "list_hosts", "test_host", "system_info", "performance", "event_log", "screenshot",
     "file_list", "file_read", "file_search", "file_hash", "file_download", "get_acl",
-    "list_services", "list_processes", "list_tasks", "list_users", "firewall_rules",
+    "list_services", "service_info", "list_processes", "process_details", "list_tasks",
+    "list_users", "firewall_rules",
     "reg_read", "uac_get", "list_staged_tools", "rdp_status", "rdp_sessions",
     "net_info", "ping", "port_check", "net_connections", "port_proxy_list",
-    "cim_query", "hotfixes", "defender_status", "env_get", "list_startup",
+    "cim_query", "hotfixes", "defender_status", "defender_exclusions", "defender_quarantine",
+    "env_get", "list_startup",
     "list_installed_software", "rdp_connection_file", "list_windows", "ui_find",
     "wait_for_port", "wait_for_service", "wait_for_process", "wait_for_file",
     "wait_for_window", "tail_file", "ocr_screen", "record_screen", "port_forward_list",
     "health_report", "whoami_priv", "failed_logons", "list_open_ports",
-    "list_toolsets", "diagnose_host",
+    "list_toolsets", "diagnose_host", "task_status",
 }
 
 # Destructive tools: delete data, kill processes, cut access, or reboot. Clients should
@@ -67,7 +72,8 @@ DESTRUCTIVE = {
     "rdp_disable", "clear_event_log", "uninstall_software", "defender_realtime",
     "task_delete", "cleanup_staged", "rdp_logoff_session", "port_proxy_delete",
     "install_rdp_wrapper", "uac_set", "rdp_connect_to_console", "rdp_set_port",
-    "unpersist_service", "task_stop",
+    "unpersist_service", "task_stop", "defender_exclusion_remove",
+    "defender_quarantine_restore", "defender_history_clear",
 }
 
 # Idempotent writers: converge the box to a desired state, so re-running with the same
@@ -78,7 +84,7 @@ IDEMPOTENT = {
     "reg_write", "reg_delete", "apply_baseline", "use_host", "uac_set", "rdp_set_port",
     "rdp_allow_multiple_sessions", "grant_acl", "take_own", "make_dir",
     "defender_exclusion_add", "defender_realtime", "file_delete", "remove_host",
-    "enable_toolset", "disable_toolset",
+    "enable_toolset", "disable_toolset", "defender_exclusion_remove",
 }
 
 # Tools whose reach stays inside the target box (no internet/third-party endpoints) are a
@@ -87,12 +93,14 @@ IDEMPOTENT = {
 CLOSED_WORLD = {
     "list_hosts", "test_host", "system_info", "performance", "event_log", "file_list",
     "file_read", "file_search", "file_hash", "get_acl", "list_services",
-    "list_processes", "list_tasks", "list_users", "firewall_rules", "reg_read",
+    "service_info", "list_processes", "process_details", "list_tasks", "list_users",
+    "firewall_rules", "reg_read",
     "uac_get", "rdp_status", "rdp_sessions", "net_info", "net_connections",
-    "port_proxy_list", "cim_query", "hotfixes", "defender_status", "env_get",
+    "port_proxy_list", "cim_query", "hotfixes", "defender_status",
+    "defender_exclusions", "defender_quarantine", "env_get",
     "list_startup", "list_installed_software", "list_windows", "ui_find",
     "health_report", "whoami_priv", "failed_logons", "list_open_ports",
-    "list_staged_tools", "list_windows",
+    "list_staged_tools", "list_windows", "task_status",
 }
 
 # Acronyms that should stay upper-cased in the human-readable display title.
@@ -128,6 +136,56 @@ def _annotations_for(name: str):
 def _csv_env(key: str) -> set[str]:
     raw = os.environ.get(key, "")
     return {p.strip() for p in raw.split(",") if p.strip()}
+
+
+_audit_lock = threading.Lock()
+
+
+def _audit_write(tool: str, host, ok: bool, ms: float, error: str | None) -> None:
+    """Append one JSONL record per tool call. Args are NOT logged (they can hold secrets)."""
+    line = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "tool": tool,
+        "host": str(host) if host else None,
+        "ok": ok,
+        "duration_ms": round(ms, 1),
+        "error": log.redact(error) if error else None,
+    }
+    try:
+        with _audit_lock:
+            with open(config.data_dir() / "audit.log", "a", encoding="utf-8") as f:
+                f.write(json.dumps(line, ensure_ascii=False) + "\n")
+    except Exception as e:  # noqa: BLE001 — auditing must never break a tool call
+        _log.debug("audit write failed: %s", e)
+
+
+def _install_audit_middleware(mcp: FastMCP) -> None:
+    """Per-call audit log (JSONL under the data dir). WINRDP_AUDIT_LOG=0 disables it."""
+    if os.environ.get("WINRDP_AUDIT_LOG", "").strip().lower() in ("0", "false", "off", "no"):
+        return
+    try:
+        from fastmcp.server.middleware import Middleware
+    except Exception:  # pragma: no cover — older FastMCP without middleware
+        _log.warning("audit log unavailable: this FastMCP lacks middleware")
+        return
+
+    class Audit(Middleware):
+        async def on_call_tool(self, context, call_next):
+            name = getattr(context.message, "name", "")
+            args = getattr(context.message, "arguments", None) or {}
+            host = args.get("host") if isinstance(args, dict) else None
+            started = time.time()
+            ok, err = True, None
+            try:
+                return await call_next(context)
+            except Exception as e:
+                ok, err = False, f"{type(e).__name__}: {e}"
+                raise
+            finally:
+                _audit_write(name, host, ok, (time.time() - started) * 1000, err)
+
+    mcp.add_middleware(Audit())
+    _log.info("per-call audit log enabled (%s)", config.data_dir() / "audit.log")
 
 
 def _install_confirm_middleware(mcp: FastMCP, destructive: set[str]) -> None:
@@ -213,6 +271,7 @@ def build_server(*, local: bool = False, seed_host: Host | None = None,
 
     mcp = FastMCP("winrdp-mcp", instructions=INSTRUCTIONS)
     _install_tool_wrapper(mcp)
+    _install_audit_middleware(mcp)
     if os.environ.get("WINRDP_CONFIRM_DESTRUCTIVE", "").strip() in ("1", "true", "yes", "on"):
         _install_confirm_middleware(mcp, DESTRUCTIVE)
 

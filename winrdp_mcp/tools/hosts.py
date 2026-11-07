@@ -6,9 +6,11 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
+from .. import health
 from ..config import WINRM_HTTP_PORT
+from ..diagnostics import _DEAD_IP
 from ..progress import Context, Progress
-from ..provision import _scan
+from ..provision import _scan, bootstrap_oneliner
 from ..transports import port_open
 from ..vault import Host
 
@@ -31,6 +33,7 @@ def register(mcp, ctx) -> None:
         ssh_host_key_policy: str = "auto",
         tags: str = "",
         make_active: bool = True,
+        expected_name: str = "",
     ) -> dict:
         """Register a Windows box in the encrypted inventory.
 
@@ -39,6 +42,9 @@ def register(mcp, ctx) -> None:
         trusted cert — recommended for production over HTTPS).
         ssh_host_key_policy: "auto" (trust-on-first-use) or "reject" (known_hosts only).
         tags: optional comma-separated labels for fan-out grouping (e.g. "prod,web").
+        expected_name: expected $env:COMPUTERNAME (NetBIOS name). test_host/provision_host
+        fail the identity step when the box reports a different name — catches a
+        mis-pointed IP or a reused alias.
         winrm_auth: "ntlm" (default) or "basic". Leave empty to use WINRDP_DEFAULT_WINRM_AUTH
         (handy when your operator network is behind a proxy that breaks NTLM — set it to
         'basic' once and every add_host defaults to Basic).
@@ -51,17 +57,36 @@ def register(mcp, ctx) -> None:
             winrm_port=winrm_port, ssh_port=ssh_port, rdp_port=rdp_port,
             winrm_cert_validation=winrm_cert_validation, ssh_host_key_policy=ssh_host_key_policy,
             tags=[t.strip() for t in tags.split(",") if t.strip()],
+            expected_name=expected_name.strip(),
         )
+        same_host = [x.alias for x in ctx.vault.all()
+                     if x.alias != alias and x.host == host]
         ctx.vault.add(h, make_active=make_active)
         ctx.invalidate(alias)
-        return {"added": alias, "active": ctx.vault.active.alias if ctx.vault.active else None}
+        out = {"added": alias, "active": ctx.vault.active.alias if ctx.vault.active else None}
+        if same_host:
+            out["aliases_for_same_host"] = same_host
+            out["warning"] = (
+                f"{host} is already registered as {', '.join(same_host)}; a command aimed at "
+                "the wrong alias hits the same box. Set expected_name so test_host verifies "
+                "the computer name.")
+        return out
 
     @mcp.tool
     def list_hosts() -> dict:
-        """List all registered boxes (passwords redacted) and which one is active."""
+        """List all registered boxes (passwords redacted) and which one is active.
+
+        `duplicate_hosts` maps one address to every alias pointing at it — a guard against
+        firing a command at the wrong name on a many-aliases-one-box inventory.
+        """
+        hosts = ctx.vault.all()
+        by_host: dict = {}
+        for h in hosts:
+            by_host.setdefault(h.host, []).append(h.alias)
         return {
             "active": ctx.vault.active.alias if ctx.vault.active else None,
-            "hosts": [h.redacted() for h in ctx.vault.all()],
+            "hosts": [h.redacted() for h in hosts],
+            "duplicate_hosts": {k: v for k, v in by_host.items() if len(v) > 1},
         }
 
     @mcp.tool
@@ -78,20 +103,54 @@ def register(mcp, ctx) -> None:
         return {"removed": ctx.vault.remove(alias), "alias": alias}
 
     @mcp.tool
-    def test_host(host: Optional[str] = None) -> dict:
-        """Scan reachable management ports and verify the live transport for a box."""
+    def test_host(host: Optional[str] = None, expected_name: Optional[str] = None) -> dict:
+        """Prove a box is actually healthy, not just that one command returned rc=0.
+
+        Runs the full matrix (identity, principal, transfer, elevation, session, platform)
+        and returns {ok, failed_step, steps, capabilities}. `ok` is true only when every
+        step passes; a failed probe invalidates the cached transport so the next call
+        reconnects instead of reusing a wedged session.
+
+        The port scan is advisory: a transparent proxy/VPN makes every port look open, so
+        `ports_reliable` is false (checked with a connect to a guaranteed-dead IP) and
+        `ports` must never be read as health. `expected_name` defaults to the host's
+        registered expected_name; when neither is set the identity step reports the name
+        without enforcing a match.
+        """
         h = ctx.resolve(host)
+        intercepts = port_open(_DEAD_IP, WINRM_HTTP_PORT, timeout=2)
         ports = _scan(h.host)
-        result = {"alias": h.alias, "host": h.host, "ports": ports}
+        result: dict = {
+            "alias": h.alias, "host": h.host, "ports": ports,
+            "operator_network": "intercepting-proxy-or-vpn" if intercepts else "direct",
+            "ports_reliable": not intercepts,
+        }
+        if intercepts:
+            result["ports_note"] = (
+                "unreliable — a connect to a guaranteed-dead IP succeeded, so the operator "
+                "network accepts connects for any address; do not read ports as health")
         try:
             t = ctx.transport_for(host)
-            r = t.run_ps("$env:COMPUTERNAME", timeout=20)
-            result["transport"] = t.name
-            result["online"] = r.ok
-            result["computername"] = r.stdout.strip()
-        except Exception as e:  # noqa: BLE001
-            result["online"] = False
-            result["error"] = str(e)
+            hc = health.check_health(
+                t, expected_name=(expected_name or h.expected_name or None))
+            result.update({
+                "transport": t.name, "ok": hc["ok"], "online": hc["ok"],
+                "kind": hc.get("kind", "windows"),
+                "failed_step": hc["failed_step"], "failed_steps": hc["failed_steps"],
+                "steps": hc["steps"], "capabilities": hc["capabilities"],
+                "computername": hc.get("hostname"),
+            })
+        except Exception as e:  # noqa: BLE001 — surface the probe failure, don't cache it
+            result.update({
+                "transport": None, "ok": False, "online": False,
+                "failed_step": "transport", "failed_steps": ["transport"],
+                "error": str(e),
+                "steps": [{"name": "transport", "ok": False, "detail": str(e)}],
+            })
+        if not result.get("ok") or result.get("failed_step") == "transport":
+            ctx.invalidate(h.alias)
+            if result.get("kind") != "posix":  # the bootstrap one-liner is Windows-only
+                result["bootstrap_oneliner"] = bootstrap_oneliner(h)
         return result
 
     @mcp.tool

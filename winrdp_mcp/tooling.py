@@ -102,15 +102,26 @@ def list_staged(transport: Transport) -> list:
     return ps.as_list(ps.parse_json(r.stdout))
 
 
-def cleanup(transport: Transport, name: Optional[str] = None) -> dict:
-    if name:
-        target = _remote_path(name)
-    else:
-        target = config.REMOTE_TOOLS
+def cleanup(transport: Transport, name: Optional[str] = None,
+            dry_run: bool = False) -> dict:
+    """Remove a staged tool (or the whole cache) and report exactly what it covered.
+
+    dry_run=True returns the same manifest without deleting — a saved profile of what a
+    cleanup would touch.
+    """
+    target = _remote_path(name) if name else config.REMOTE_TOOLS
+    remove = ("" if dry_run else
+              "Remove-Item -LiteralPath $t -Recurse -Force -ErrorAction SilentlyContinue;")
     body = (
-        f"if(Test-Path {ps.ps_string(target)}){{Remove-Item -LiteralPath {ps.ps_string(target)} "
-        f"-Recurse -Force; $result=@{{removed=$true;target={ps.ps_string(target)}}}}}"
-        f"else{{$result=@{{removed=$false;target={ps.ps_string(target)}}}}}"
+        f"$t={ps.ps_string(target)};$files=@();"
+        "if(Test-Path -LiteralPath $t){"
+        "$files=@(Get-ChildItem -LiteralPath $t -Recurse -File -ErrorAction SilentlyContinue|"
+        "ForEach-Object{@{path=$_.FullName;bytes=$_.Length}});"
+        + remove +
+        "};"
+        "$sum=0;foreach($f in $files){$sum+=[int64]$f.bytes};"
+        f"$result=@{{target=$t;dry_run=${'true' if dry_run else 'false'};"
+        "count=@($files).Count;bytes=$sum;files=@($files)}"
     )
     r = transport.run_ps(ps.wrap_json(body))
     return ps.parse_json(r.stdout)
