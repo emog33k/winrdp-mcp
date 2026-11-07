@@ -4,15 +4,57 @@ from __future__ import annotations
 
 import binascii
 import os
-import shutil
 import tempfile
+import time
 from typing import Optional
 
-from .. import ps
+from .. import localscan, ps
 from ..config import REMOTE_TMP
+from ..localscan import MB
 from ..models import ExecResult
 from ..progress import Context, Progress
+from ..transports import transfer_eta_seconds
 from . import _validate as V
+
+# Channels that move a file in one shot. Anything else is chunked base64 over WinRM
+# (~0.4 MB/s), where a "just upload it" of 50 MB is two minutes of silence — hence the
+# much tighter default size guard below.
+_FAST_CHANNELS = {"smb", "sftp", "local"}
+_AUTO_LIMIT_MB = {True: 1024.0, False: 25.0}
+
+
+def _size_limit_mb(channel: Optional[str], max_mb: Optional[float]) -> float:
+    """Resolve the transfer size ceiling. ``max_mb=None`` auto-sizes it from the channel
+    (generous over SMB/SFTP/local, tight over chunked WinRM); ``max_mb<=0`` disables it."""
+    if max_mb is None:
+        return _AUTO_LIMIT_MB[channel in _FAST_CHANNELS]
+    return float(max_mb)
+
+
+def _eta(seconds: float) -> str:
+    if seconds < 90:
+        return f"~{int(seconds)}s"
+    return f"~{seconds / 60:.1f}min"
+
+
+def _too_big(what: str, total_bytes: int, channel: Optional[str], limit_mb: float,
+             hint: str, extra: Optional[dict] = None) -> dict:
+    """The refusal every size guard returns: what it is, why it stopped, how to proceed."""
+    eta = transfer_eta_seconds(total_bytes, channel)
+    out = {
+        "ok": False,
+        "needs_confirmation": True,
+        "reason": (f"{what} is {total_bytes / MB:.1f} MB over the "
+                   f"'{channel or 'chunked (slow WinRM base64)'}' channel ({_eta(eta)}), "
+                   f"above the {limit_mb:g} MB guard — nothing was transferred"),
+        "total_mb": round(total_bytes / MB, 2),
+        "limit_mb": limit_mb,
+        "channel": channel or "chunked",
+        "estimated_seconds": round(eta, 1),
+        "hint": hint,
+    }
+    out.update(extra or {})
+    return out
 
 
 def register(mcp, ctx) -> None:
@@ -86,19 +128,48 @@ def register(mcp, ctx) -> None:
 
     @mcp.tool
     def file_upload(local_path: str, remote_path: str, host: Optional[str] = None,
+                    max_mb: Optional[float] = None, force: bool = False,
                     mcp_ctx: Context | None = None) -> dict:
-        """Upload a file from the operator machine to a box. Uses the fast SMB/SFTP channel
-        when available (one shot); otherwise streams chunked over WinRM and reports progress."""
+        """Upload a file from the operator machine to a box.
+
+        Uses the fast SMB/SFTP channel when available (one shot); otherwise streams chunked
+        base64 over WinRM, which is ~50x slower — a 50 MB file is minutes.
+
+        Because of that, the size is checked BEFORE any bytes move: over the chunked
+        fallback anything above 25 MB is refused with the measured size and a time estimate
+        rather than blocking in silence; over a fast channel the ceiling is 1 GB. Override
+        with `max_mb` (`max_mb=0` disables the check) or `force=True`. For a big file it is
+        usually faster to pull it on the box directly with download_file(url).
+
+        Returns {ok, remote_path, bytes, channel, seconds, mbps} — `channel` tells you
+        which path it actually took, so a slow upload is explainable afterwards.
+        """
+        if not os.path.isfile(local_path):
+            return {"ok": False, "error": f"not a file: {local_path}"}
+        total = os.path.getsize(local_path)
+        t = ctx.transport_for(host)
+        channel = t.file_channel()
+        limit_mb = _size_limit_mb(channel, max_mb)
+        if limit_mb > 0 and total > limit_mb * MB and not force:
+            return _too_big(
+                os.path.basename(local_path), total, channel, limit_mb,
+                "raise max_mb=<N>, pass force=True, or (for a large download) call "
+                "download_file(url, dest) so the box fetches it itself",
+                {"local_path": local_path},
+            )
+
+        p = Progress(mcp_ctx, total)
+        p.report(0, f"uploading {os.path.basename(local_path)} ({total / MB:.1f} MB via {channel or 'chunked'})")
         with open(local_path, "rb") as f:
             data = f.read()
-        total = len(data)
-        p = Progress(mcp_ctx, total)
-        p.report(0, f"uploading {os.path.basename(local_path)} ({total} bytes)")
-        ctx.transport_for(host).upload(
-            data, remote_path,
-            progress=lambda done, tot: p.report(done, f"uploaded {done}/{tot} bytes", total=tot),
-        )
-        return {"ok": True, "remote_path": remote_path, "bytes": total}
+        started = time.time()
+        t.upload(data, remote_path,
+                 progress=lambda done, tot: p.report(done, f"uploaded {done}/{tot} bytes", total=tot))
+        secs = max(time.time() - started, 0.001)
+        p.report(total, "upload complete")
+        return {"ok": True, "remote_path": remote_path, "bytes": total,
+                "channel": channel or "chunked", "seconds": round(secs, 1),
+                "mbps": round(total / MB / secs, 2)}
 
     @mcp.tool
     def file_download(remote_path: str, local_path: str, host: Optional[str] = None) -> dict:
@@ -284,26 +355,84 @@ def register(mcp, ctx) -> None:
 
     @mcp.tool
     def sync_folder(local_path: str, remote_path: str, host: Optional[str] = None,
-                    mirror: bool = False, mcp_ctx: Context | None = None) -> dict:
-        """Mirror a LOCAL operator folder to a box efficiently (zip → upload → expand).
-        mirror=True wipes the destination first so it matches the source exactly."""
+                    mirror: bool = False, exclude: Optional[list[str]] = None,
+                    max_mb: Optional[float] = None, force: bool = False,
+                    dry_run: bool = False, timeout: int = 900,
+                    mcp_ctx: Context | None = None) -> dict:
+        """Mirror a LOCAL operator folder to a box efficiently (scan → zip → upload → expand).
+
+        The folder is SCANNED FIRST, so nothing moves blind:
+
+        * `exclude` — glob patterns to leave out. A pattern with no `/` matches the basename
+          at any depth (`node_modules`, `*.bin`, `.git`); one with `/` matches the path
+          relative to the sync root (`presets/**`, `build/out/*.bin`); a trailing `/`
+          restricts it to directories. Matching a directory prunes the whole subtree, so a
+          good exclude list also makes the scan itself fast.
+        * size guard — if what remains is bigger than the ceiling, the call is REFUSED
+          before zipping and returns the measured size plus the heaviest directories and
+          files, so you can see what to exclude. The ceiling defaults to 1 GB over a fast
+          SMB/SFTP channel and 25 MB over the slow chunked-WinRM fallback; set `max_mb`
+          explicitly (`max_mb=0` disables it) or pass `force=True`.
+        * `dry_run=True` — return exactly that manifest (file count, MB, largest entries,
+          what the excludes dropped, estimated transfer time) and transfer nothing.
+
+        `mirror=True` wipes the destination first so it matches the source exactly.
+        Returns the destination, the file count, byte/compression figures, the channel used
+        and a per-phase timing breakdown (zip / upload / expand).
+        """
         if not os.path.isdir(local_path):
-            return {"error": f"not a directory: {local_path}"}
+            return {"ok": False, "error": f"not a directory: {local_path}"}
         prog = Progress(mcp_ctx, 100)
-        prog.report(5, f"zipping {local_path}")
+        prog.report(2, f"scanning {local_path}")
+        scan = localscan.scan(local_path, exclude)
+        t = ctx.transport_for(host)
+        channel = t.file_channel()
+        limit_mb = _size_limit_mb(channel, max_mb)
+        manifest = scan.manifest()
+
+        if dry_run:
+            return {
+                "ok": True, "dry_run": True, "source": scan.root, "dest": remote_path,
+                "channel": channel or "chunked", "limit_mb": limit_mb,
+                "estimated_seconds": round(transfer_eta_seconds(scan.total_bytes, channel), 1),
+                "within_limit": limit_mb <= 0 or scan.total_bytes <= limit_mb * MB,
+                "excludes_applied": list(exclude or []),
+                **manifest,
+            }
+        if limit_mb > 0 and scan.total_bytes > limit_mb * MB and not force:
+            return _too_big(
+                f"{local_path} ({scan.file_count} files)", scan.total_bytes, channel, limit_mb,
+                "narrow it with exclude=[...] (see largest_entries / largest_files below), "
+                "raise max_mb=<N>, or pass force=True to send it anyway; "
+                "dry_run=True re-measures without transferring",
+                {"source": scan.root, "dest": remote_path, **manifest},
+            )
+        if not scan.files:
+            return {"ok": False, "error": f"nothing to sync: every file under {local_path} "
+                                          f"was excluded", **manifest}
+
         tmp_base = os.path.join(tempfile.gettempdir(), "winrdp_sync_" + binascii.hexlify(os.urandom(4)).decode())
-        zip_path = shutil.make_archive(tmp_base, "zip", local_path)
+        zip_path = tmp_base + ".zip"
         try:
+            prog.report(5, f"zipping {scan.file_count} files ({scan.total_mb} MB)")
+            t0 = time.time()
+            zip_bytes = localscan.build_zip(
+                scan, zip_path,
+                progress=lambda done, tot: prog.report(5 + int(done / max(tot, 1) * 30),
+                                                       f"zipping {done}/{tot} bytes"))
+            zip_secs = time.time() - t0
             with open(zip_path, "rb") as f:
                 data = f.read()
             rid = binascii.hexlify(os.urandom(4)).decode()
             remote_zip = f"{REMOTE_TMP}\\sync_{rid}.zip"
-            t = ctx.transport_for(host)
-            prog.report(15, f"uploading archive ({len(data)} bytes)")
-            t.upload(data, remote_zip,
-                     progress=lambda done, tot: prog.report(15 + int(done / max(tot, 1) * 70),
-                                                             f"uploading archive {done}/{tot} bytes"))
+            prog.report(35, f"uploading archive ({zip_bytes / MB:.1f} MB via {channel or 'chunked'})")
+            t0 = time.time()
+            t.upload(data, remote_zip, timeout=timeout,
+                     progress=lambda done, tot: prog.report(35 + int(done / max(tot, 1) * 55),
+                                                            f"uploading archive {done}/{tot} bytes"))
+            up_secs = time.time() - t0
             prog.report(90, "expanding on the box")
+            t0 = time.time()
             clear = (f"if(Test-Path {ps.ps_string(remote_path)}){{Remove-Item -LiteralPath {ps.ps_string(remote_path)} "
                      "-Recurse -Force}};") if mirror else ""
             body = (
@@ -315,8 +444,27 @@ def register(mcp, ctx) -> None:
                 "$result=@{dest=" + ps.ps_string(remote_path) + ";files=$n;mirror=" +
                 ("$true" if mirror else "$false") + "}"
             )
-            out = ctx.exec_json(body, host=host, timeout=600)
+            out = ctx.exec_json(body, host=host, timeout=timeout)
+            expand_secs = time.time() - t0
             prog.report(100, "sync complete")
+            if not isinstance(out, dict):
+                out = {"dest": remote_path, "raw": out}
+            out.update({
+                "ok": True,
+                "source": scan.root,
+                "files_sent": scan.file_count,
+                "bytes_local": scan.total_bytes,
+                "bytes_zip": zip_bytes,
+                "compression": round(zip_bytes / max(scan.total_bytes, 1), 3),
+                "channel": channel or "chunked",
+                "seconds": {"zip": round(zip_secs, 1), "upload": round(up_secs, 1),
+                            "expand": round(expand_secs, 1)},
+                "upload_mbps": round(zip_bytes / MB / max(up_secs, 0.001), 2),
+            })
+            if scan.excluded_files or scan.excluded_dirs:
+                out["excluded"] = manifest["excluded"]
+            if scan.unreadable:
+                out["unreadable"] = scan.unreadable[:10]
             return out
         finally:
             try:

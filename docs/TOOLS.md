@@ -20,7 +20,7 @@ The complete catalog of every tool exposed by the `winrdp-mcp` FastMCP server. E
 - [Windows](#windows) — `winrdp_mcp/tools/windows.py`
 - [GUI](#gui-guipy--15-tools) — `winrdp_mcp/tools/gui.py`
 - [Waiters](#waiters-waiterspy--4-tools) — `winrdp_mcp/tools/waiters.py`
-- [Scheduling](#scheduling-schedulingpy--4-tools) — `winrdp_mcp/tools/scheduling.py`
+- [Scheduling](#scheduling-schedulingpy--6-tools) — `winrdp_mcp/tools/scheduling.py`
 - [Tunnel](#tunnel-tunnelpy--3-tools) — `winrdp_mcp/tools/tunnel.py`
 - [Ops](#ops-opspy--5-tools) — `winrdp_mcp/tools/ops.py`
 - [Prompts & resources](#prompts--resources)
@@ -41,8 +41,8 @@ Tool visibility can be narrowed at startup: `WINRDP_ENABLED_TOOLS` (CSV allow-li
 
 | Group | Module | Tools | read-only | destructive | mutating |
 | --- | --- | --: | --: | --: | --: |
-| Hosts & Fleet | `hosts.py` | 8 | 2 | 2 | 4 |
-| Provisioning / UAC / Tooling | `provisioning.py` | 10 | 2 | 2 | 6 |
+| Hosts & Fleet | `hosts.py` | 9 | 3 | 2 | 4 |
+| Provisioning / UAC / Tooling | `provisioning.py` | 11 | 2 | 2 | 7 |
 | System | `system.py` | 8 | 4 | 2 | 2 |
 | Scripting | `scripting.py` | 6 | 0 | 0 | 6 |
 | Files | `files.py` | 21 | 7 | 1 | 13 |
@@ -53,10 +53,10 @@ Tool visibility can be narrowed at startup: `WINRDP_ENABLED_TOOLS` (CSV allow-li
 | Windows | `windows.py` | 11 | 5 | 1 | 5 |
 | GUI | `gui.py` | 15 | 5 | 0 | 10 |
 | Waiters | `waiters.py` | 4 | 4 | 0 | 0 |
-| Scheduling | `scheduling.py` | 4 | 0 | 1 | 3 |
+| Scheduling | `scheduling.py` | 6 | 1 | 2 | 3 |
 | Tunnel | `tunnel.py` | 3 | 1 | 0 | 2 |
 | Ops | `ops.py` | 5 | 4 | 0 | 1 |
-| **Total** | | **144** | **49** | **23** | **72** |
+| **Total** | | **148** | **51** | **24** | **73** |
 
 ---
 
@@ -194,10 +194,13 @@ deploy_ui_agent(host: Optional[str] = None, port: int = 8765,
 Shell execution, system facts, live performance, event log, live-desktop screenshot, and power control.
 
 #### `run_powershell` — mutating
-Run a PowerShell script on a box — the universal escape hatch. `elevated=True` runs with a full unfiltered token (Scheduled Task); `as_user=True` runs inside the interactive RDP desktop session.
+Run a PowerShell script on a box — the universal escape hatch. Runs **remotely**: on `host`, or on the active host (`use_host`) when omitted. `elevated=True` runs with a full unfiltered token (Scheduled Task); `as_user=True` runs inside the interactive RDP desktop session; `detach=True` launches it fire-and-forget in a Scheduled Task that survives the session close (returns the task + log paths — follow up with `task_status(task)` / `task_stop(task)`); `loopback=True` routes through a Scheduled Task so the script can reach `127.0.0.1`.
+
+`kill_on_timeout=True` kills the remote process and its children when `timeout` expires. By default a timeout only abandons the request — the script **keeps running** on the box, holding its locks. Not available with `as_user=True` (use `task_stop` there).
 ```python
 run_powershell(script: str, host: Optional[str] = None, elevated: bool = False,
-               as_user: bool = False, timeout: int = 120)
+               as_user: bool = False, detach: bool = False, loopback: bool = False,
+               timeout: int = 120, kill_on_timeout: bool = False)
 ```
 
 #### `run_cmd` — mutating
@@ -250,18 +253,21 @@ power_action(action: str = "shutdown", host: Optional[str] = None, delay_seconds
 One-shot script execution: the runtime is located, installed on demand if missing, dependencies pip-installed, code staged and executed, and `stdout`/`stderr`/`rc` returned. All six are mutating.
 
 #### `run_python` — mutating
-Run inline Python code on a box. `pip` installs packages first; `ensure_python=True` auto-installs Python (winget) if missing; `elevated`/`as_user` for full-token / interactive-desktop execution.
+Run inline Python code **on a remote box** — never on the operator machine. `host` names a registered box; omitting it targets the *active* host (`use_host`), so `host=None` still means remote. To execute on the operator machine, register it once with `add_host("local", "localhost", transport="local")` and pass `host="local"`. The result carries `host` (the box it ran on) and `python` (the interpreter path that ran it), so you can always tell where it executed.
+
+`pip` installs packages first (on the box); `ensure_python=True` auto-installs Python (winget) if missing; `elevated`/`as_user` for full-token / interactive-desktop execution; `kill_on_timeout=True` kills the remote python process when `timeout` expires instead of leaving it running.
 ```python
 run_python(code: str, host: Optional[str] = None, args: str = "", pip: str = "",
            ensure_python: bool = True, elevated: bool = False, as_user: bool = False,
-           timeout: int = 600)
+           timeout: int = 600, kill_on_timeout: bool = False)
 ```
 
 #### `run_python_file` — mutating
-Upload a `.py` file from the operator machine and run it on a box.
+Upload a `.py` file from the operator machine and run it on a box. Only the file is read locally; execution is remote (same host semantics as `run_python`).
 ```python
 run_python_file(local_path: str, host: Optional[str] = None, args: str = "",
-                pip: str = "", elevated: bool = False, timeout: int = 600)
+                pip: str = "", elevated: bool = False, timeout: int = 600,
+                kill_on_timeout: bool = False)
 ```
 
 #### `pip_install` — mutating
@@ -271,16 +277,18 @@ pip_install(packages: str, host: Optional[str] = None, timeout: int = 600)
 ```
 
 #### `run_script` — mutating
-Run a script in any interpreter on a box. `interpreter`: auto | python | node | powershell | cmd | bat | vbscript (`auto` guesses from shebang/syntax, defaulting to PowerShell).
+Run a script in any interpreter **on a remote box** (same host semantics as `run_python`). `interpreter`: auto | python | node | powershell | cmd | bat | vbscript (`auto` guesses from shebang/syntax, defaulting to PowerShell).
 ```python
 run_script(content: str, interpreter: str = "auto", host: Optional[str] = None,
-           args: str = "", elevated: bool = False, as_user: bool = False, timeout: int = 600)
+           args: str = "", elevated: bool = False, as_user: bool = False,
+           timeout: int = 600, kill_on_timeout: bool = False)
 ```
 
 #### `run_node` — mutating
-Run inline Node.js code on a box (Node must be installed).
+Run inline Node.js code on a remote box (Node must be installed there).
 ```python
-run_node(code: str, host: Optional[str] = None, args: str = "", timeout: int = 300)
+run_node(code: str, host: Optional[str] = None, args: str = "", timeout: int = 300,
+         kill_on_timeout: bool = False)
 ```
 
 #### `ensure_runtime` — mutating
@@ -321,9 +329,14 @@ file_search(path: str, pattern: str = "*", host: Optional[str] = None,
 ```
 
 #### `file_upload` — mutating
-Upload a file from the operator machine to a box.
+Upload a file from the operator machine to a box. Uses the fast SMB/SFTP channel when available (one shot); otherwise streams chunked base64 over WinRM, ~50x slower.
+
+The size is checked **before any bytes move**: over the chunked fallback anything above 25 MB is refused with the measured size and a time estimate (`{ok: false, needs_confirmation: true, …}`) rather than blocking in silence; over a fast channel the ceiling is 1 GB. Override with `max_mb` (`max_mb=0` disables the check) or `force=True`. For a large file it is usually faster to let the box fetch it itself with `download_file(url, dest)`.
+
+Returns `{ok, remote_path, bytes, channel, seconds, mbps}` — `channel` is `smb`/`sftp`/`local`/`chunked`, so a slow upload is explainable afterwards.
 ```python
-file_upload(local_path: str, remote_path: str, host: Optional[str] = None)
+file_upload(local_path: str, remote_path: str, host: Optional[str] = None,
+            max_mb: Optional[float] = None, force: bool = False)
 ```
 
 #### `file_download` — read-only
@@ -412,9 +425,22 @@ edit_file(path: str, find: str, replace: str, host: Optional[str] = None, regex:
 ```
 
 #### `sync_folder` — mutating
-Mirror a LOCAL operator folder to a box efficiently (zip → upload → expand). `mirror=True` wipes the destination first.
+Mirror a LOCAL operator folder to a box efficiently (scan → zip → upload → expand). `mirror=True` wipes the destination first. The folder is **scanned before anything moves**, so a sync is never blind:
+
+* **`exclude`** — glob patterns to leave out. A pattern with no `/` matches the basename at any depth (`node_modules`, `*.bin`, `.git`); one with `/` matches the path relative to the sync root (`presets/**`, `build/out/*.bin`); a trailing `/` restricts it to directories. Matching a directory prunes the whole subtree, so a good exclude list also makes the scan itself fast.
+* **size guard** — if what remains exceeds the ceiling the call is refused *before zipping* and returns the measured size plus `largest_entries` / `largest_files`, so you can see what to exclude. Default ceiling: 1 GB over a fast SMB/SFTP channel, 25 MB over chunked WinRM. Set `max_mb` (`max_mb=0` disables) or pass `force=True`.
+* **`dry_run=True`** — return that manifest (file count, MB, largest entries, what the excludes dropped, `estimated_seconds`) and transfer nothing.
+
+On success returns the destination and file count plus `bytes_local`, `bytes_zip`, `compression`, `channel`, `upload_mbps` and a per-phase `seconds` breakdown (`zip` / `upload` / `expand`). Progress notifications are emitted for each phase (scan → zip → upload → expand) for clients that display them.
 ```python
-sync_folder(local_path: str, remote_path: str, host: Optional[str] = None, mirror: bool = False)
+sync_folder(local_path: str, remote_path: str, host: Optional[str] = None, mirror: bool = False,
+            exclude: Optional[list[str]] = None, max_mb: Optional[float] = None,
+            force: bool = False, dry_run: bool = False, timeout: int = 900)
+```
+```python
+# measure first, then sync what matters
+sync_folder(r"C:\proj", r"C:\app", dry_run=True)
+sync_folder(r"C:\proj", r"C:\app", exclude=["node_modules", ".git", "*.bin", "presets/**"])
 ```
 
 #### `transfer_between_hosts` — mutating
@@ -967,9 +993,23 @@ wait_for_file(path: str, host: Optional[str] = None, exists: bool = True, timeou
 
 ---
 
-## Scheduling (`scheduling.py`) — 4 tools
+## Scheduling (`scheduling.py`) — 6 tools
 
-Run commands on a schedule, at startup, or as a resilient auto-restarting service.
+Run commands on a schedule, at startup, or as a resilient auto-restarting service — and check on / cancel a detached job.
+
+#### `task_status` — read-only
+Check on a detached job: is it still running, did it succeed, what did it print. The counterpart to `run_powershell(detach=True)` / `start_process(detach=True)` / `schedule_command` — pass back the `task` name they returned and get the live state plus the tail of its stdout/stderr logs in one call.
+
+Returns `{task, status, running, pids, state, last_run, exit_code, stdout, stderr, stdout_log, stderr_log}`. `status` is one of `running` | `finished` | `not_yet_run` | `finished_unregistered` | `not_found`. `exit_code` is the exit code of the last completed run (null while running); Task Scheduler's own `0x413xx` pseudo-results surface as `task_result` instead of being mistaken for an exit code. `stdout`/`stderr` are `{bytes, tail[]}` or null.
+```python
+task_status(name: str, host: Optional[str] = None, lines: int = 20, max_bytes: int = 4000)
+```
+
+#### `task_stop` — destructive
+Stop a running scheduled task and kill its process tree — the clean way to cancel a detached job. Also kills any child processes the task spawned, then (by default) unregisters the task.
+```python
+task_stop(name: str, host: Optional[str] = None, unregister: bool = True)
+```
 
 #### `schedule_command`
 Create a recurring scheduled task. `schedule`: MINUTE | HOURLY | DAILY | WEEKLY | ONLOGON | ONSTART; `every` is the interval modifier for MINUTE/HOURLY. Runs `run_as` (SYSTEM needs no password).

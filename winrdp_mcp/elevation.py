@@ -79,6 +79,36 @@ def _rid() -> str:
     return binascii.hexlify(os.urandom(6)).decode()
 
 
+def kill_task(transport: Transport, task: str, marker: str, *,
+              unregister: bool = True) -> list[int]:
+    """Stop a scheduled task AND kill the process tree it spawned; return the killed pids.
+
+    ``Stop-ScheduledTask`` alone is not enough: it signals the task, but a child process the
+    task's powershell already started (an installer, a python script) keeps running. The
+    task's staged script path is a unique string on those processes' command lines, so
+    ``marker`` identifies exactly that tree and nothing else. Best-effort throughout — a
+    cleanup path must not raise over the error that triggered it.
+    """
+    body = (
+        f"$n={ps.ps_string(task)};$m={ps.ps_string(marker)};$killed=@();"
+        "try{Stop-ScheduledTask -TaskName $n -ErrorAction SilentlyContinue}catch{};"
+        "try{$procs=@(Get-CimInstance Win32_Process -Filter \"CommandLine LIKE '%$m%'\" "
+        "-ErrorAction SilentlyContinue);foreach($p in $procs){"
+        "try{& taskkill /PID $($p.ProcessId) /T /F 2>$null|Out-Null;$killed+=$p.ProcessId}catch{}}}catch{};"
+        + ("try{Unregister-ScheduledTask -TaskName $n -Confirm:$false -ErrorAction SilentlyContinue}catch{};"
+           if unregister else "")
+        + "$result=@{killed=@($killed)}"
+    )
+    try:
+        data = ps.parse_json(transport.run_ps(ps.wrap_json(body), timeout=90).stdout)
+        killed = data.get("killed") if isinstance(data, dict) else None
+        if isinstance(killed, int):  # ConvertTo-Json unwraps a single element
+            return [killed]
+        return list(killed or [])
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def run_elevated(
     transport: Transport,
     script: str,
@@ -88,8 +118,15 @@ def run_elevated(
     password: Optional[str] = None,
     poll: float = 1.5,
     progress=None,
+    kill_on_timeout: bool = False,
 ) -> ElevatedResult:
-    """Execute ``script`` with a full elevated token via a transient Scheduled Task."""
+    """Execute ``script`` with a full elevated token via a transient Scheduled Task.
+
+    On timeout the remote work does NOT stop by itself — the deadline here is only the
+    poll loop's. ``kill_on_timeout=True`` stops the task and kills its process tree before
+    raising; otherwise the task and its logs are deliberately LEFT IN PLACE (not cleaned
+    up) so the caller can poll it with ``task_status`` or cancel it with ``task_stop``.
+    """
     rid = _rid()
     task = f"winrdp_elev_{rid}"
     base = f"{REMOTE_TMP}\\{task}"
@@ -129,6 +166,7 @@ def run_elevated(
         )
     reg_lines.append(f"Start-ScheduledTask -TaskName {ps.ps_string(task)}")
     transport.run_ps(";".join(reg_lines), timeout=60).raise_for_status("register elevated task")
+    timed_out = False
     try:
         start = time.time()
         deadline = start + timeout
@@ -143,7 +181,18 @@ def run_elevated(
                     pass
             time.sleep(poll)
         else:
-            raise TransportError(f"elevated task timed out after {timeout}s")
+            timed_out = True
+            if kill_on_timeout:
+                killed = kill_task(transport, task, remote_ps)
+                raise TransportError(
+                    f"elevated task timed out after {timeout}s — task stopped and "
+                    f"{len(killed)} process(es) killed on the box (kill_on_timeout=True)")
+            raise TransportError(
+                f"elevated task timed out after {timeout}s, but it is STILL RUNNING on the "
+                f"box (the deadline is the poll loop's, not the remote process's). Poll it "
+                f"with task_status('{task}'), read its output with tail_file('{out_f}'), or "
+                f"cancel it with task_stop('{task}'). Pass kill_on_timeout=True to have a "
+                f"timeout kill it instead of leaving it running.")
 
         out = _safe_read(transport, out_f)
         err = _safe_read(transport, err_f)
@@ -157,17 +206,20 @@ def run_elevated(
         return ElevatedResult(out, err, rc)
     finally:
         # Best-effort cleanup: if it raises (wedged transport) it must NOT replace the
-        # result / mask the real exception being propagated.
-        try:
-            transport.run_ps(
-                f"Unregister-ScheduledTask -TaskName {ps.ps_string(task)} -Confirm:$false -ErrorAction SilentlyContinue;"
-                "Remove-Item -LiteralPath " + ",".join(
-                    ps.ps_string(p) for p in (remote_ps, out_f, err_f, done_f)
-                ) + " -Force -ErrorAction SilentlyContinue",
-                timeout=30,
-            )
-        except Exception:  # noqa: BLE001
-            pass
+        # result / mask the real exception being propagated. Skipped entirely on a timeout
+        # the caller didn't ask us to kill — unregistering a task that is still running
+        # would orphan it, leaving no handle to poll or stop it with.
+        if not timed_out or kill_on_timeout:
+            try:
+                transport.run_ps(
+                    f"Unregister-ScheduledTask -TaskName {ps.ps_string(task)} -Confirm:$false -ErrorAction SilentlyContinue;"
+                    "Remove-Item -LiteralPath " + ",".join(
+                        ps.ps_string(p) for p in (remote_ps, out_f, err_f, done_f)
+                    ) + " -Force -ErrorAction SilentlyContinue",
+                    timeout=30,
+                )
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def run_detached(transport: Transport, script: str, *, run_as: str = "SYSTEM") -> dict:
@@ -202,8 +254,10 @@ def run_detached(transport: Transport, script: str, *, run_as: str = "SYSTEM") -
     return {
         "detached": True, "task": task, "stdout_log": out_f, "stderr_log": err_f,
         "note": ("running outside the WinRM Job Object (survives session close) and with "
-                 "loopback access. Read output with tail_file(stdout_log); stop it cleanly "
-                 f"with task_stop('{task}') (stops the task and kills its process tree)."),
+                 f"loopback access. Check whether it is still alive and what it exited with "
+                 f"via task_status('{task}'); read more output with tail_file(stdout_log); "
+                 f"stop it cleanly with task_stop('{task}') (stops the task and kills its "
+                 "process tree)."),
     }
 
 

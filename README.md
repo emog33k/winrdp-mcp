@@ -130,11 +130,11 @@ If the box has only RDP open, `provision_host` returns a `bootstrap_oneliner` to
 | **Windows** | `windows.py` | 11 | `cim_query` (any WQL), `windows_features`, `windows_update`, `hotfixes`, Defender (`status`/`realtime`/`exclusion_add`/`scan`), `env_get`/`env_set`, `list_startup` |
 | **GUI** | `gui.py` | 15 | windows/keyboard/mouse (`send_keys`, `type_text`, `mouse_click`, `mouse_drag`), UI Automation (`ui_find`/`ui_invoke`/`ui_set_text`), `ocr_screen`, `find_and_click`, `wait_for_window`, `record_screen`, `gui_script` |
 | **Waiters** | `waiters.py` | 4 | `wait_for_port`, `wait_for_service`, `wait_for_process`, `wait_for_file` — block until a condition holds |
-| **Scheduling** | `scheduling.py` | 5 | `schedule_command`, `run_at_startup`, `persist_as_service` (NSSM auto-restart), `unpersist_service`, `task_stop` |
+| **Scheduling** | `scheduling.py` | 6 | `schedule_command`, `run_at_startup`, `persist_as_service` (NSSM auto-restart), `unpersist_service`, `task_status` (is a detached job alive / what did it exit with), `task_stop` |
 | **Tunnel** | `tunnel.py` | 3 | `port_forward`, `port_forward_stop`, `port_forward_list` — SSH local-forward a box's service to your machine |
 | **Ops** | `ops.py` | 5 | `health_report`, `apply_baseline`, `whoami_priv`, `failed_logons`, `list_open_ports` — one-call health & security reads |
 
-Safety classification across all 147: **50 read-only**, **24 destructive**, **73 mutating**. Read-only tools are safe to auto-run; destructive tools carry `destructiveHint=True` so clients gate them behind confirmation.
+Safety classification across all 148: **51 read-only**, **24 destructive**, **73 mutating**. Read-only tools are safe to auto-run; destructive tools carry `destructiveHint=True` so clients gate them behind confirmation.
 
 ### Prompts & resources
 

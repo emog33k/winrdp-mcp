@@ -32,21 +32,36 @@ def register(mcp, ctx) -> None:
         elevated: bool = False,
         as_user: bool = False,
         timeout: int = 600,
+        kill_on_timeout: bool = False,
     ) -> dict:
-        """Run inline Python code on a box and return its output.
+        """Run inline Python code ON A REMOTE BOX and return its output.
 
-        `pip`: optional comma/space-separated packages to install first.
+        This NEVER runs on the operator machine. `host` names a registered box; omitting it
+        targets the *active* host (the one set with use_host — list_hosts shows which). It
+        is not a local/remote switch: `host=None` still means remote. To execute on the
+        operator machine itself, register it once with
+        add_host("local", "localhost", transport="local") and pass host="local".
+
+        The code is staged to a temp .py on the box, run by the box's own Python
+        interpreter, then deleted. `python` in the result is the interpreter path that ran
+        it and `host` is the box it ran on — check them if you are unsure where it executed.
+
+        `pip`: optional comma/space-separated packages to install first (on the box).
         `ensure_python`: install Python automatically (winget) if it's missing.
         `elevated`/`as_user`: full-token / interactive-desktop execution.
-        Returns {python, stdout, stderr, rc}.
+        `kill_on_timeout`: kill the remote python process when `timeout` expires — by
+        default a timeout only abandons the call and the script keeps running on the box.
+        Returns {host, python, stdout, stderr, rc}.
         """
+        alias = ctx.resolve(host).alias
         t = ctx.transport_for(host)
         py = _find_python(t)
         if not py and ensure_python:
             _install_python(ctx, host)
             py = _find_python(t)
         if not py:
-            return {"error": "Python not found and could not be installed. "
+            return {"host": alias,
+                    "error": "Python not found on the box and could not be installed. "
                              "Call ensure_runtime or install manually."}
 
         if pip:
@@ -59,18 +74,24 @@ def register(mcp, ctx) -> None:
         t.upload(code.encode("utf-8"), remote)
         cmd = f'& {ps.ps_string(py)} {ps.ps_string(remote)} {args}'.strip()
         try:
-            r = ctx.exec_ps(cmd, host=host, elevated=elevated, as_user=as_user, timeout=timeout)
-            return {"python": py, "stdout": r.stdout, "stderr": r.stderr, "rc": r.rc}
+            r = ctx.exec_ps(cmd, host=host, elevated=elevated, as_user=as_user,
+                            timeout=timeout, kill_on_timeout=kill_on_timeout)
+            return {"host": alias, "python": py, "stdout": r.stdout, "stderr": r.stderr,
+                    "rc": r.rc}
         finally:
             t.run_ps(f"Remove-Item -LiteralPath {ps.ps_string(remote)} -Force -ErrorAction SilentlyContinue")
 
     @mcp.tool
     def run_python_file(local_path: str, host: Optional[str] = None, args: str = "",
-                        pip: str = "", elevated: bool = False, timeout: int = 600) -> dict:
-        """Upload a .py file from the operator machine and run it on a box."""
+                        pip: str = "", elevated: bool = False, timeout: int = 600,
+                        kill_on_timeout: bool = False) -> dict:
+        """Upload a .py file from the operator machine and run it ON A REMOTE BOX (the one
+        named by `host`, or the active host). Only the file is read locally; execution is
+        remote — see run_python for the host semantics."""
         with open(local_path, "r", encoding="utf-8") as f:
             code = f.read()
-        return run_python(code, host=host, args=args, pip=pip, elevated=elevated, timeout=timeout)
+        return run_python(code, host=host, args=args, pip=pip, elevated=elevated,
+                          timeout=timeout, kill_on_timeout=kill_on_timeout)
 
     @mcp.tool
     def pip_install(packages: str, host: Optional[str] = None, timeout: int = 600,
@@ -97,27 +118,34 @@ def register(mcp, ctx) -> None:
         elevated: bool = False,
         as_user: bool = False,
         timeout: int = 600,
+        kill_on_timeout: bool = False,
     ) -> dict:
-        """Run a script in any interpreter on a box.
+        """Run a script in any interpreter ON A REMOTE BOX (`host`, or the active host —
+        never locally; see run_python for the host semantics).
 
         interpreter: auto | python | node | powershell | cmd | bat | vbscript.
         'auto' guesses from a shebang or obvious syntax, defaulting to PowerShell.
-        Returns {interpreter, stdout, stderr, rc}.
+        `kill_on_timeout`: kill the remote process when `timeout` expires instead of
+        leaving it running.
+        Returns {host, interpreter, stdout, stderr, rc}.
         """
         interp = interpreter
         if interp == "auto":
             interp = _guess_interpreter(content)
 
+        alias = ctx.resolve(host).alias
         t = ctx.transport_for(host)
         t.run_ps(ps.ensure_remote_dirs())
 
         if interp == "powershell":
-            r = ctx.exec_ps(content, host=host, elevated=elevated, as_user=as_user, timeout=timeout)
-            return {"interpreter": interp, "stdout": r.stdout, "stderr": r.stderr, "rc": r.rc}
+            r = ctx.exec_ps(content, host=host, elevated=elevated, as_user=as_user,
+                            timeout=timeout, kill_on_timeout=kill_on_timeout)
+            return {"host": alias, "interpreter": interp, "stdout": r.stdout,
+                    "stderr": r.stderr, "rc": r.rc}
 
         ext = {"python": "py", "node": "js", "cmd": "bat", "bat": "bat", "vbscript": "vbs"}.get(interp)
         if not ext:
-            return {"error": f"unknown interpreter '{interpreter}'"}
+            return {"host": alias, "error": f"unknown interpreter '{interpreter}'"}
         remote = _rid(ext)
         t.upload(content.encode("utf-8"), remote)
         runner = {
@@ -128,15 +156,19 @@ def register(mcp, ctx) -> None:
             "vbscript": lambda p: f"& cscript //nologo {ps.ps_string(p)} {args}",
         }[interp](remote)
         try:
-            r = ctx.exec_ps(runner.strip(), host=host, elevated=elevated, as_user=as_user, timeout=timeout)
-            return {"interpreter": interp, "stdout": r.stdout, "stderr": r.stderr, "rc": r.rc}
+            r = ctx.exec_ps(runner.strip(), host=host, elevated=elevated, as_user=as_user,
+                            timeout=timeout, kill_on_timeout=kill_on_timeout)
+            return {"host": alias, "interpreter": interp, "stdout": r.stdout,
+                    "stderr": r.stderr, "rc": r.rc}
         finally:
             t.run_ps(f"Remove-Item -LiteralPath {ps.ps_string(remote)} -Force -ErrorAction SilentlyContinue")
 
     @mcp.tool
-    def run_node(code: str, host: Optional[str] = None, args: str = "", timeout: int = 300) -> dict:
-        """Run inline Node.js code on a box (Node must be installed)."""
-        return run_script(code, interpreter="node", host=host, args=args, timeout=timeout)
+    def run_node(code: str, host: Optional[str] = None, args: str = "", timeout: int = 300,
+                 kill_on_timeout: bool = False) -> dict:
+        """Run inline Node.js code ON A REMOTE BOX (Node must be installed there)."""
+        return run_script(code, interpreter="node", host=host, args=args, timeout=timeout,
+                          kill_on_timeout=kill_on_timeout)
 
     @mcp.tool
     def ensure_runtime(runtime: str = "python", host: Optional[str] = None, timeout: int = 900,

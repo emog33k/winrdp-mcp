@@ -94,6 +94,19 @@ _CHUNK = 1600
 # Staging uses the fast file channel (SMB/SFTP), so it stays cheap.
 _MAX_INLINE_PS = 2400
 
+# Rough throughput per file channel, MB/s — used ONLY to turn a byte count into a
+# human/model-readable "this will take about N minutes" before a transfer starts, so a big
+# upload can be refused with a reason instead of blocking in silence. Order-of-magnitude
+# figures from observed transfers, not a measurement: `chunked` is _CHUNK bytes per WinRM
+# round-trip, which is why it is ~50x slower than SMB and worth warning about.
+CHANNEL_MBPS = {"local": 150.0, "smb": 20.0, "sftp": 8.0, "chunked": 0.4}
+
+
+def transfer_eta_seconds(total_bytes: int, channel: str | None) -> float:
+    """Rough seconds to move ``total_bytes`` over ``channel`` (None = chunked fallback)."""
+    rate = CHANNEL_MBPS.get(channel or "chunked", CHANNEL_MBPS["chunked"])
+    return (total_bytes / (1024 * 1024)) / rate
+
 
 class Transport:
     """Abstract transport."""
@@ -205,6 +218,14 @@ class Transport:
             timeout=timeout,
         ).raise_for_status("download")
         return base64.b64decode(r.stdout.strip())
+
+    def file_channel(self) -> Optional[str]:
+        """Name of the channel :meth:`upload` will actually use — ``smb``/``sftp``/``local``,
+        or ``None`` for the chunked base64-over-run_ps fallback (~50x slower).
+
+        Callers use this to size a transfer *before* starting it: see
+        :func:`transfer_eta_seconds`. Cheap after the first call (the probe is cached)."""
+        return None
 
     def probe(self) -> bool:  # pragma: no cover
         raise NotImplementedError
@@ -428,6 +449,11 @@ class WinRMTransport(Transport):
         self._fchan = False
         return None
 
+    def file_channel(self) -> Optional[str]:
+        with self._oplock:
+            ch = self._fast_channel()
+        return ch[0] if ch else None
+
     def _drop_fast_channel(self) -> None:
         """Close and forget the current fast file channel (so it isn't leaked when it fails
         and we fall back to chunked base64)."""
@@ -559,6 +585,9 @@ class SSHTransport(Transport):
             rc = stdout.channel.recv_exit_status()
         return ExecResult(out, err, rc)
 
+    def file_channel(self) -> Optional[str]:
+        return "sftp"
+
     def upload(self, data: bytes, remote_path: str, timeout: int = 300, progress=None) -> None:
         # Ensure parent dir, then SFTP the bytes — far faster than base64 chunking.
         self.run_ps(
@@ -661,6 +690,9 @@ class LocalTransport(Transport):
             proc.stderr.decode("utf-8", "replace"),
             proc.returncode,
         )
+
+    def file_channel(self) -> Optional[str]:
+        return "local"
 
     def upload(self, data: bytes, remote_path: str, timeout: int = 300, progress=None) -> None:
         os.makedirs(os.path.dirname(remote_path) or ".", exist_ok=True)

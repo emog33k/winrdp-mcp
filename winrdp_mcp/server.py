@@ -56,7 +56,7 @@ READONLY = {
     "wait_for_port", "wait_for_service", "wait_for_process", "wait_for_file",
     "wait_for_window", "tail_file", "ocr_screen", "record_screen", "port_forward_list",
     "health_report", "whoami_priv", "failed_logons", "list_open_ports",
-    "list_toolsets", "diagnose_host",
+    "list_toolsets", "diagnose_host", "task_status",
 }
 
 # Destructive tools: delete data, kill processes, cut access, or reboot. Clients should
@@ -92,7 +92,7 @@ CLOSED_WORLD = {
     "port_proxy_list", "cim_query", "hotfixes", "defender_status", "env_get",
     "list_startup", "list_installed_software", "list_windows", "ui_find",
     "health_report", "whoami_priv", "failed_logons", "list_open_ports",
-    "list_staged_tools", "list_windows",
+    "list_staged_tools", "list_windows", "task_status",
 }
 
 # Acronyms that should stay upper-cased in the human-readable display title.
