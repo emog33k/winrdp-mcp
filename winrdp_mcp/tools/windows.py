@@ -158,6 +158,107 @@ def register(mcp, ctx) -> None:
         return ctx.exec_json(body, host=host, elevated=True)
 
     @mcp.tool
+    def defender_exclusions(host: Optional[str] = None) -> dict:
+        """List Defender exclusions: paths, extensions, processes and IP addresses."""
+        body = (
+            "$p=Get-MpPreference -ErrorAction Stop;"
+            "$result=@{paths=@($p.ExclusionPath);extensions=@($p.ExclusionExtension);"
+            "processes=@($p.ExclusionProcess);ips=@($p.ExclusionIpAddress)}"
+        )
+        return ctx.exec_json(body, host=host, elevated=True)
+
+    @mcp.tool
+    def defender_exclusion_remove(path: Optional[str] = None,
+                                  extension: Optional[str] = None,
+                                  process: Optional[str] = None,
+                                  host: Optional[str] = None) -> dict:
+        """Remove a Defender exclusion by path, extension or process. Provide at least one."""
+        if not (path or extension or process):
+            return {"error": "provide path, extension or process"}
+        lines = []
+        removed = []
+        if path:
+            lines.append(f"Remove-MpPreference -ExclusionPath {ps.ps_string(path)}")
+            removed.append(f"path:{path}")
+        if extension:
+            lines.append(f"Remove-MpPreference -ExclusionExtension {ps.ps_string(extension)}")
+            removed.append(f"extension:{extension}")
+        if process:
+            lines.append(f"Remove-MpPreference -ExclusionProcess {ps.ps_string(process)}")
+            removed.append(f"process:{process}")
+        lines.append("$result=@{ok=$true;removed=@(" +
+                     ",".join(ps.ps_string(r) for r in removed) + ")}")
+        return ctx.exec_json(";".join(lines), host=host, elevated=True)
+
+    @mcp.tool
+    def defender_quarantine(host: Optional[str] = None) -> dict:
+        """List Defender detections and threats (quarantine history): name, resources,
+        detection time and status."""
+        body = (
+            "$names=@{};Get-MpThreat -ErrorAction SilentlyContinue|"
+            "ForEach-Object{$names[[int64]$_.ThreatID]=$_.ThreatName};"
+            "$dets=@(Get-MpThreatDetection -ErrorAction SilentlyContinue|ForEach-Object{@{"
+            "threat_id=[int64]$_.ThreatID;"
+            "threat_name=if($names.ContainsKey([int64]$_.ThreatID)){"
+            "$names[[int64]$_.ThreatID]}else{$null};"
+            "detection_id=[string]$_.DetectionID;"
+            "initial_time=if($_.InitialDetectionTime){$_.InitialDetectionTime.ToString('o')}"
+            "else{$null};resources=@($_.Resources);"
+            "action=if($_.ActionSuccess){'success'}else{'failed'}}});"
+            "$threats=@(Get-MpThreat -ErrorAction SilentlyContinue|ForEach-Object{@{"
+            "threat_id=[int64]$_.ThreatID;threat_name=$_.ThreatName;"
+            "resources=@($_.Resources);severity=[int]$_.SeverityID;"
+            "detected=if($_.DetectionTime){$_.DetectionTime.ToString('o')}else{$null}}});"
+            "$result=@{detections=$dets;threats=$threats}"
+        )
+        return ctx.exec_json(body, host=host, elevated=True)
+
+    @mcp.tool
+    def defender_quarantine_restore(threat_name: str = "", host: Optional[str] = None,
+                                    all_items: bool = False) -> dict:
+        """Restore quarantined items via MpCmdRun -Restore. Provide threat_name, or
+        all_items=True to restore everything Defender quarantined."""
+        if not threat_name and not all_items:
+            return {"error": "provide threat_name or all_items=True"}
+        if threat_name:
+            V.obj_name(threat_name, "threat_name")
+        args = "-Restore -All" if all_items else f"-Restore -Name {ps.ps_string(threat_name)}"
+        body = (
+            "$mp=@((Join-Path $env:ProgramFiles 'Windows Defender\\MpCmdRun.exe'),"
+            "(Get-ChildItem \"$env:ProgramData\\Microsoft\\Windows Defender\\Platform\\*\\"
+            "MpCmdRun.exe\" -ErrorAction SilentlyContinue|Sort-Object FullName -Descending|"
+            "Select-Object -First 1 -ExpandProperty FullName))|"
+            "Where-Object{$_ -and (Test-Path $_)}|Select-Object -First 1;"
+            "if(-not $mp){throw 'MpCmdRun.exe not found'};"
+            f"$out=& $mp {args} 2>&1|Out-String;$rc=$LASTEXITCODE;"
+            "$result=@{ok=($rc -eq 0);rc=$rc;output=$out}"
+        )
+        return ctx.exec_json(body, host=host, elevated=True)
+
+    @mcp.tool
+    def defender_history_clear(host: Optional[str] = None) -> dict:
+        """Clear Defender threat history / quarantine (`Remove-MpThreat`).
+
+        Tamper Protection blocks this. The tool checks `IsTamperProtected` first and
+        returns a clear error instead of a cmdlet failure.
+        """
+        body = (
+            "$s=Get-MpComputerStatus -ErrorAction SilentlyContinue;"
+            "if($s -and $s.IsTamperProtected){"
+            "$result=@{ok=$false;tamper_protected=$true;error='Tamper Protection is enabled; "
+            "history/quarantine cannot be cleared. Disable it in Windows Security > Virus & "
+            "threat protection > Manage settings first.'}}"
+            "else{try{$before=@(Get-MpThreatDetection -ErrorAction SilentlyContinue).Count;"
+            "Remove-MpThreat -ErrorAction Stop;"
+            "$after=@(Get-MpThreatDetection -ErrorAction SilentlyContinue).Count;"
+            "$result=@{ok=$true;tamper_protected=$false;before=$before;after=$after;"
+            "removed=[math]::Max(0,$before-$after)}}"
+            "catch{$result=@{ok=$false;tamper_protected=($s -and $s.IsTamperProtected);"
+            "error=$_.Exception.Message}}}"
+        )
+        return ctx.exec_json(body, host=host, elevated=True)
+
+    @mcp.tool
     def defender_scan(host: Optional[str] = None, scan_type: str = "QuickScan",
                       timeout: int = 1800, mcp_ctx: Context | None = None) -> dict:
         """Run a Defender scan. scan_type: QuickScan | FullScan. Runs elevated."""

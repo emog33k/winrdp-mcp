@@ -48,10 +48,12 @@ needs it. For a rare one-off, prefer run_powershell over enabling a whole group.
 READONLY = {
     "list_hosts", "test_host", "system_info", "performance", "event_log", "screenshot",
     "file_list", "file_read", "file_search", "file_hash", "file_download", "get_acl",
-    "list_services", "list_processes", "list_tasks", "list_users", "firewall_rules",
+    "list_services", "service_info", "list_processes", "process_details", "list_tasks",
+    "list_users", "firewall_rules",
     "reg_read", "uac_get", "list_staged_tools", "rdp_status", "rdp_sessions",
     "net_info", "ping", "port_check", "net_connections", "port_proxy_list",
-    "cim_query", "hotfixes", "defender_status", "env_get", "list_startup",
+    "cim_query", "hotfixes", "defender_status", "defender_exclusions", "defender_quarantine",
+    "env_get", "list_startup",
     "list_installed_software", "rdp_connection_file", "list_windows", "ui_find",
     "wait_for_port", "wait_for_service", "wait_for_process", "wait_for_file",
     "wait_for_window", "tail_file", "ocr_screen", "record_screen", "port_forward_list",
@@ -67,7 +69,8 @@ DESTRUCTIVE = {
     "rdp_disable", "clear_event_log", "uninstall_software", "defender_realtime",
     "task_delete", "cleanup_staged", "rdp_logoff_session", "port_proxy_delete",
     "install_rdp_wrapper", "uac_set", "rdp_connect_to_console", "rdp_set_port",
-    "unpersist_service", "task_stop",
+    "unpersist_service", "task_stop", "defender_exclusion_remove",
+    "defender_quarantine_restore", "defender_history_clear",
 }
 
 # Idempotent writers: converge the box to a desired state, so re-running with the same
@@ -78,7 +81,7 @@ IDEMPOTENT = {
     "reg_write", "reg_delete", "apply_baseline", "use_host", "uac_set", "rdp_set_port",
     "rdp_allow_multiple_sessions", "grant_acl", "take_own", "make_dir",
     "defender_exclusion_add", "defender_realtime", "file_delete", "remove_host",
-    "enable_toolset", "disable_toolset",
+    "enable_toolset", "disable_toolset", "defender_exclusion_remove",
 }
 
 # Tools whose reach stays inside the target box (no internet/third-party endpoints) are a
@@ -87,9 +90,11 @@ IDEMPOTENT = {
 CLOSED_WORLD = {
     "list_hosts", "test_host", "system_info", "performance", "event_log", "file_list",
     "file_read", "file_search", "file_hash", "get_acl", "list_services",
-    "list_processes", "list_tasks", "list_users", "firewall_rules", "reg_read",
+    "service_info", "list_processes", "process_details", "list_tasks", "list_users",
+    "firewall_rules", "reg_read",
     "uac_get", "rdp_status", "rdp_sessions", "net_info", "net_connections",
-    "port_proxy_list", "cim_query", "hotfixes", "defender_status", "env_get",
+    "port_proxy_list", "cim_query", "hotfixes", "defender_status",
+    "defender_exclusions", "defender_quarantine", "env_get",
     "list_startup", "list_installed_software", "list_windows", "ui_find",
     "health_report", "whoami_priv", "failed_logons", "list_open_ports",
     "list_staged_tools", "list_windows", "task_status",

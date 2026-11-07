@@ -102,6 +102,43 @@ def register(mcp, ctx) -> None:
         )
         return ctx.exec_json(body, host=host, elevated=False)
 
+    @mcp.tool
+    def service_info(name: str, host: Optional[str] = None) -> dict:
+        """Everything about one service, including the NSSM registry Parameters.
+
+        `list_services` only shows name/display/status/start. This returns the executable
+        (`PathName`/`ImagePath`), run-as account, PID, dependencies, and — for services
+        installed by NSSM — `AppDirectory`, `AppParameters`, `AppEnvironment`, which
+        Win32_Service and Get-Service do not expose.
+        """
+        V.obj_name(name, "name")
+        body = (
+            f"$n={ps.ps_string(name)};"
+            "$s=Get-CimInstance Win32_Service -ErrorAction SilentlyContinue|"
+            "Where-Object{$_.Name -eq $n}|Select-Object -First 1;"
+            "$k='HKLM:\\SYSTEM\\CurrentControlSet\\Services\\'+$n;"
+            "$r=if(Test-Path $k){Get-ItemProperty -Path $k -ErrorAction SilentlyContinue}else{$null};"
+            "$p=if(Test-Path ($k+'\\Parameters')){"
+            "Get-ItemProperty -Path ($k+'\\Parameters') -ErrorAction SilentlyContinue}else{$null};"
+            "$result=@{name=$n;exists=($s -ne $null -or $r -ne $null);"
+            "display_name=if($s){$s.DisplayName}else{$null};"
+            "description=if($s){$s.Description}else{$null};"
+            "state=if($s){$s.State}else{$null};"
+            "start_mode=if($s){$s.StartMode}else{$null};"
+            "start_name=if($s){$s.StartName}else{$null};"
+            "process_id=if($s){[int]$s.ProcessId}else{$null};"
+            "path_name=if($s){$s.PathName}else{$null};"
+            "image_path=if($r){[string]$r.ImagePath}else{$null};"
+            "object_name=if($r){[string]$r.ObjectName}else{$null};"
+            "app_directory=if($p){[string]$p.AppDirectory}else{$null};"
+            "app_parameters=if($p){[string]$p.AppParameters}else{$null};"
+            "app_environment=if($p){@($p.AppEnvironment)}else{@()};"
+            "app_throttle=if($p){[string]$p.AppThrottle}else{$null};"
+            "depend_on_service=if($s){@($s.ServicesDependedOn)}else{@()};"
+            "is_nssm=($p -ne $null -and ($p.AppDirectory -or $p.AppParameters -or $p.AppEnvironment))}"
+        )
+        return ctx.exec_json(body, host=host)
+
     # ------------------------------------------------------------------ processes
     @mcp.tool
     def list_processes(host: Optional[str] = None, name: Optional[str] = None, top: int = 100) -> list:
@@ -114,6 +151,49 @@ def register(mcp, ctx) -> None:
             "cpu_s=[math]::Round($_.CPU,1);path=$_.Path}})"
         )
         return ps.as_list(ctx.exec_json(body, host=host))
+
+    @mcp.tool
+    def process_details(pid: Optional[int] = None, name: Optional[str] = None,
+                        host: Optional[str] = None, top: int = 10) -> dict:
+        """Detailed process view: parent, full command line, executable, owner, session,
+        start time, threads/handles.
+
+        `cwd` and `environment` are null: Win32_Process does not expose them. For a
+        service, `service_info(name)` reads the NSSM AppDirectory/AppEnvironment instead.
+        """
+        if pid is None and not name:
+            return {"error": "provide pid or name"}
+        if pid is not None:
+            flt = f"ProcessId={int(pid)}"
+        else:
+            V.obj_name(name, "name")
+            flt = "Name='" + name.replace("'", "''") + "'"
+        body = (
+            f"$procs=@(Get-CimInstance Win32_Process -Filter {ps.ps_string(flt)} "
+            f"-ErrorAction Stop|Select-Object -First {int(top)});"
+            "$all=@{};Get-CimInstance Win32_Process -ErrorAction SilentlyContinue|"
+            "ForEach-Object{$all[[int]$_.ProcessId]=$_.Name};"
+            "$result=@{processes=@(@($procs)|ForEach-Object{"
+            "$o=$null;try{$o=Invoke-CimMethod -InputObject $_ -MethodName GetOwner "
+            "-ErrorAction SilentlyContinue}catch{};"
+            "@{pid=[int]$_.ProcessId;name=$_.Name;ppid=[int]$_.ParentProcessId;"
+            "parent_name=if($all.ContainsKey([int]$_.ParentProcessId)){"
+            "$all[[int]$_.ParentProcessId]}else{$null};"
+            "command_line=$_.CommandLine;executable=$_.ExecutablePath;"
+            "owner=if($o -and $o.User){if($o.Domain){$o.Domain+'\\'+$o.User}else{$o.User}}"
+            "else{$null};"
+            "session_id=[int]$_.SessionId;"
+            "created=if($_.CreationDate){$_.CreationDate.ToString('o')}else{$null};"
+            "threads=[int]$_.ThreadCount;handles=[int]$_.HandleCount;"
+            "working_set_mb=[math]::Round($_.WorkingSetSize/1MB,1);"
+            "cwd=$null;environment=$null}})}"
+        )
+        out = ctx.exec_json(body, host=host)
+        if isinstance(out, dict):
+            out["cwd_note"] = ("Win32_Process does not expose a working directory; for a "
+                               "service use service_info(name) to read NSSM AppDirectory")
+            out["environment_note"] = out["cwd_note"]
+        return out
 
     @mcp.tool
     def kill_process(pid: Optional[int] = None, name: Optional[str] = None,
