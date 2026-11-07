@@ -107,15 +107,17 @@ class Context:
         kill_on_timeout: bool = False,
     ) -> ExecResult:
         h = self.resolve(host)
-        t = self.transport_for(host)
         script = ps.wrap_plain(body_or_script) if wrap else body_or_script
         mode = "as_user" if as_user else ("elevated" if elevated else "normal")
+        # Validate argument combinations BEFORE opening a transport: an invalid call must
+        # fail the same way on every OS (a POSIX local transport cannot even probe).
         if kill_on_timeout and as_user:
             raise ValueError("kill_on_timeout is not supported with as_user=True; cancel an "
                              "interactive-session job with task_stop instead")
         if session_id is not None and not as_user:
             raise ValueError("session_id only applies with as_user=True (it selects the "
                              "interactive session to run in)")
+        t = self.transport_for(host)
         start = time.time()
         try:
             if as_user:
